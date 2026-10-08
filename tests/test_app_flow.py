@@ -1,6 +1,6 @@
 """Test del coordinamento tra risultati di inferenza e registrazione (FaceAccessApp).
 
-L'applicazione viene costruita senza `__init__`: niente modelli AI, webcam, finestre o database.
+L'applicazione viene costruita senza `__init__`: niente modelli AI, webcam, finestre o server.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import unittest
 from app.enrollment import ENTER_KEYS, EnrollmentSession, EnrollmentState
 from app.main import FaceAccessApp, _greeting_texts
 from app.models import FrameResult, Greeting, GreetingKind, Match
-from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings, other_person_vector
+from tests.helpers import FakeClock, FakeStore, face_vector, make_detection, make_settings, other_person_vector
 
 
 class FakeUI:
@@ -32,7 +32,7 @@ class FakeCamera:
 class EnrollmentFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
-        self.db = FakeDatabase()
+        self.db = FakeStore()
         settings = make_settings()
         self.app = FaceAccessApp.__new__(FaceAccessApp)
         self.app._settings = settings
@@ -46,11 +46,11 @@ class EnrollmentFlowTest(unittest.TestCase):
     def state(self) -> EnrollmentState:
         return self.app._enrollment.state
 
-    def unknown_result(self, axis: int = 1, *, db_ok: bool = True) -> FrameResult:
+    def unknown_result(self, axis: int = 1, *, gallery_ok: bool = True) -> FrameResult:
         """Nuovo risultato di inferenza con un solo volto sconosciuto; la webcam e gia due frame avanti."""
         self.frame_id += 1
         self.app._camera.frame_id = self.frame_id + 2
-        return FrameResult(frame_id=self.frame_id, detections=[make_detection(face_vector(axis))], db_ok=db_ok)
+        return FrameResult(frame_id=self.frame_id, detections=[make_detection(face_vector(axis))], gallery_ok=gallery_ok)
 
     def feed(self, result: FrameResult | None, seconds: float = 0.6) -> None:
         self.app._update_enrollment(result)
@@ -77,7 +77,7 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Profilo creato. Benvenuto, Mario!"])
 
     def test_registration_starts_with_a_known_person_in_view(self) -> None:
-        anna = make_detection(other_person_vector(), match=Match(7, "Anna", 0.8))
+        anna = make_detection(other_person_vector(), match=Match("uid-anna", "Anna", 0.8))
         for _ in range(4):
             result = self.unknown_result()
             result.detections.insert(0, anna)
@@ -88,7 +88,7 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.confirm_unknown_face()
         for _ in range(2):  # la stessa persona, ora riconosciuta: era un falso "sconosciuto"
             result = self.unknown_result()
-            result.detections[0].match = Match(7, "Anna", 0.8)
+            result.detections[0].match = Match("uid-anna", "Anna", 0.8)
             self.feed(result)
         self.assertIs(self.state, EnrollmentState.IDLE)
         self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Volto gia registrato come Anna"])
@@ -112,9 +112,9 @@ class EnrollmentFlowTest(unittest.TestCase):
             self.feed(result)
         self.assertIs(self.state, EnrollmentState.IDLE)
 
-    def test_results_without_database_are_ignored(self) -> None:
+    def test_results_without_gallery_are_ignored(self) -> None:
         for _ in range(10):
-            self.feed(self.unknown_result(db_ok=False))
+            self.feed(self.unknown_result(gallery_ok=False))
             self.feed(None)
         self.assertIs(self.state, EnrollmentState.IDLE)
 

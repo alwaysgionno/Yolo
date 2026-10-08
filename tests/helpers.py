@@ -1,4 +1,4 @@
-"""Oggetti di supporto per i test: impostazioni, orologio, volti e database simulati."""
+"""Oggetti di supporto per i test: impostazioni, orologio, volti e archivio simulati."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from app.config import Settings
-from app.database_manager import DatabaseError
+from app.person_store import StoreError
 from app.models import FaceDetection, Match
 
 EMBEDDING_SIZE = 512
@@ -17,11 +17,10 @@ EMBEDDING_SIZE = 512
 def make_settings(**overrides: object) -> Settings:
     """Impostazioni valide, con la possibilita di sostituire singoli valori."""
     values: dict[str, object] = {
-        "db_host": "localhost",
-        "db_port": 5432,
-        "db_name": "face_access_test",
-        "db_user": "face_app",
-        "db_password": "password-solo-per-i-test",
+        "mqtt_host": "127.0.0.1",
+        "mqtt_port": 1883,
+        "mqtt_username": "camera",
+        "mqtt_password": "password-solo-per-i-test",
         "camera_index": 0,
         "camera_width": 640,
         "camera_height": 480,
@@ -40,7 +39,6 @@ def make_settings(**overrides: object) -> Settings:
         "min_sharpness": 60.0,
         "continuous_batch_size": 3,
         "continuous_min_interval_seconds": 600.0,
-        "max_continuous_embeddings": 20,
         "top_k_neighbors": 5,
     }
     values.update(overrides)
@@ -98,39 +96,39 @@ def make_detection(
     )
 
 
-class FakeDatabase:
-    """Sostituisce DatabaseManager: tiene i dati in memoria e puo simulare un guasto."""
+class FakeStore:
+    """Sostituisce PersonStore: tiene i dati in memoria e puo simulare un guasto."""
 
     def __init__(self) -> None:
-        self.failing: set[str] = set()   # nomi dei metodi che devono sollevare DatabaseError
+        self.failing: set[str] = set()   # nomi dei metodi che devono sollevare StoreError
         self.existing_names: set[str] = set()
         self.nearest: list[Match] = []   # risposta di find_nearest
         self.created: list[tuple[str, list[np.ndarray], list[float]]] = []
-        self.greetings: list[tuple[int, float]] = []
-        self.continuous: list[tuple[int, np.ndarray, float, int]] = []
+        self.greetings: list[tuple[str, float]] = []
+        self.continuous: list[tuple[str, np.ndarray, float]] = []
 
     def _check(self, method: str) -> None:
         if method in self.failing:
-            raise DatabaseError("database simulato non disponibile")
+            raise StoreError("archivio simulato non disponibile")
 
     def person_exists(self, full_name: str) -> bool:
         self._check("person_exists")
         return full_name.lower() in self.existing_names
 
-    def create_person(self, full_name: str, embeddings: Sequence[np.ndarray], qualities: Sequence[float]) -> int:
+    def create_person(self, full_name: str, embeddings: Sequence[np.ndarray], qualities: Sequence[float]) -> str:
         self._check("create_person")
         self.created.append((full_name, list(embeddings), list(qualities)))
         self.existing_names.add(full_name.lower())
-        return len(self.created)
+        return f"uid-{len(self.created)}"
 
     def find_nearest(self, embedding: np.ndarray, limit: int) -> list[Match]:
         self._check("find_nearest")
         return list(self.nearest[:limit])
 
-    def record_greeting(self, person_id: int, similarity: float) -> None:
+    def record_greeting(self, person_id: str, similarity: float) -> None:
         self._check("record_greeting")
         self.greetings.append((person_id, similarity))
 
-    def add_continuous_embedding(self, person_id: int, embedding: np.ndarray, quality: float, max_stored: int) -> None:
+    def add_continuous_embedding(self, person_id: str, embedding: np.ndarray, quality: float) -> None:
         self._check("add_continuous_embedding")
-        self.continuous.append((person_id, embedding, quality, max_stored))
+        self.continuous.append((person_id, embedding, quality))

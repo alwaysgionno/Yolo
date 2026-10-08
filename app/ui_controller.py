@@ -67,6 +67,7 @@ class UIController:
         result: FrameResult | None,
         enrollment: EnrollmentSession,
         camera_connected: bool,
+        server_online: bool,
         ui_fps: float,
         inference_fps: float,
     ) -> np.ndarray:
@@ -76,7 +77,7 @@ class UIController:
         if result is not None:
             candidate = enrollment.candidate_in(result.detections)
             for detection in result.detections:
-                _draw_detection(canvas, detection, verified=result.db_ok, enrolling=detection is candidate)
+                _draw_detection(canvas, detection, verified=result.gallery_ok, enrolling=detection is candidate)
 
         if enrollment.state is EnrollmentState.NAME_INPUT:
             _draw_name_prompt(canvas, enrollment)
@@ -87,8 +88,8 @@ class UIController:
         if not camera_connected:
             _draw_centered_message(canvas, "Webcam non disponibile: riconnessione in corso...")
 
-        db_ok = result.db_ok if result is not None else True
-        _draw_status_line(canvas, ui_fps, inference_fps, db_ok, camera_connected)
+        gallery_ok = result.gallery_ok if result is not None else True
+        _draw_status_line(canvas, ui_fps, inference_fps, gallery_ok, server_online, camera_connected)
         return canvas
 
     def show(self, canvas: np.ndarray) -> None:
@@ -151,7 +152,7 @@ def _draw_detection(canvas: np.ndarray, detection: FaceDetection, verified: bool
     """Disegna il riquadro del volto con nome e similarita (verde) o 'Sconosciuto' (rosso).
 
     Il volto seguito dalla registrazione in corso (`enrolling`) e mostrato in arancione.
-    Se il database non ha risposto (`verified` False) il volto non e stato confrontato:
+    Se la galleria non e ancora arrivata dal server (`verified` False) il volto non e stato confrontato:
     viene mostrato in grigio, senza indicarlo come sconosciuto.
     """
     x1, y1, x2, y2 = detection.bbox
@@ -254,14 +255,16 @@ def _draw_status_line(
     canvas: np.ndarray,
     ui_fps: float,
     inference_fps: float,
-    db_ok: bool,
+    gallery_ok: bool,
+    server_online: bool,
     camera_connected: bool,
 ) -> None:
-    """Barra di stato in basso con frame rate, stato del database e della webcam."""
+    """Barra di stato in basso con frame rate, stato della galleria, del server e della webcam."""
     height, width = canvas.shape[:2]
     status = (
         f"Video {ui_fps:4.1f} fps | Inferenza {inference_fps:4.1f} fps | "
-        f"DB: {'OK' if db_ok else 'ERRORE'} | Webcam: {'OK' if camera_connected else 'OFF'} | Q: esci"
+        f"Galleria: {'OK' if gallery_ok else 'ATTESA'} | Server: {'OK' if server_online else 'OFF'} | "
+        f"Webcam: {'OK' if camera_connected else 'OFF'} | Q: esci"
     )
     cv2.rectangle(canvas, (0, height - STATUS_BAR_HEIGHT), (width, height), (0, 0, 0), cv2.FILLED)
     scale = _fit_font_scale([status], width - 2 * SCREEN_MARGIN, 0.5, thickness=1)

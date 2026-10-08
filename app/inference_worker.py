@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 from .camera_stream import CameraStream
-from .database_manager import DatabaseError
+from .person_store import StoreError
 from .face_processor import FaceProcessor
 from .models import FrameResult, Greeting
 from .recognition_service import RecognitionService
@@ -44,7 +44,7 @@ class InferenceWorker(threading.Thread):
         self._latest: FrameResult | None = None
         self._greetings: queue.Queue[Greeting] = queue.Queue()
         self._fps = 0.0
-        self._db_ok = True  # esito dell'ultimo accesso al database, usato solo dal thread di inferenza
+        self._gallery_ok = True  # esito dell'ultimo riconoscimento, usato solo dal thread di inferenza
 
     @property
     def fps(self) -> float:
@@ -109,16 +109,16 @@ class InferenceWorker(threading.Thread):
         started = time.perf_counter()
         detections = self._processor.process(frame)
 
-        db_ok = True
+        gallery_ok = True
         try:
             greetings = self._recognizer.process(detections)
-        except DatabaseError as exc:
-            if self._db_ok:  # si registra solo il cambio di stato, non un errore per fotogramma
-                logger.error("Database non disponibile durante il riconoscimento: %s", exc)
-            greetings, db_ok = [], False
-        if db_ok and not self._db_ok:
-            logger.info("Database di nuovo disponibile: riconoscimento ripreso")
-        self._db_ok = db_ok
+        except StoreError as exc:
+            if self._gallery_ok:  # si registra solo il cambio di stato, non un errore per fotogramma
+                logger.warning("Riconoscimento sospeso: %s", exc)
+            greetings, gallery_ok = [], False
+        if gallery_ok and not self._gallery_ok:
+            logger.info("Galleria disponibile: riconoscimento attivo")
+        self._gallery_ok = gallery_ok
 
         for greeting in greetings:
             self._greetings.put(greeting)
@@ -126,5 +126,5 @@ class InferenceWorker(threading.Thread):
             frame_id=frame_id,
             detections=detections,
             inference_ms=(time.perf_counter() - started) * 1000.0,
-            db_ok=db_ok,
+            gallery_ok=gallery_ok,
         )

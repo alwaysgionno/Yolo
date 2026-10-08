@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 ENV_FILE: Path = PROJECT_ROOT / ".env"
-PLACEHOLDER_PASSWORDS = frozenset({"", "cambia_questa_password_forte"})
+PLACEHOLDER_PASSWORDS = frozenset({"", "cambia_la_password_della_telecamera"})
 MODEL_STRIDE = 32  # YOLO e il rilevatore di InsightFace lavorano su lati multipli di 32
 
 
@@ -58,12 +58,11 @@ def _get_float(name: str, default: float) -> float:
 class Settings:
     """Parametri di esecuzione, caricati una sola volta all'avvio."""
 
-    # Database
-    db_host: str
-    db_port: int
-    db_name: str
-    db_user: str
-    db_password: str
+    # Broker MQTT del server
+    mqtt_host: str
+    mqtt_port: int
+    mqtt_username: str
+    mqtt_password: str
 
     # Webcam
     camera_index: int
@@ -90,7 +89,6 @@ class Settings:
     min_sharpness: float
     continuous_batch_size: int
     continuous_min_interval_seconds: float
-    max_continuous_embeddings: int
     top_k_neighbors: int
 
     @classmethod
@@ -104,7 +102,7 @@ class Settings:
         if not ENV_FILE.exists():
             raise ConfigurationError(
                 f"File .env non trovato ({ENV_FILE}). "
-                "Copia .env.example in .env e imposta DB_PASSWORD."
+                "Copia .env.example in .env e imposta MQTT_HOST e MQTT_PASSWORD."
             )
         load_dotenv(ENV_FILE)
 
@@ -113,11 +111,10 @@ class Settings:
             yolo_path = PROJECT_ROOT / yolo_path
 
         settings = cls(
-            db_host=_get_str("DB_HOST", "127.0.0.1"),
-            db_port=_get_int("DB_PORT", 5432),
-            db_name=_get_str("DB_NAME", "face_access"),
-            db_user=_get_str("DB_USER", "face_app"),
-            db_password=_get_str("DB_PASSWORD"),
+            mqtt_host=_get_str("MQTT_HOST", "127.0.0.1"),
+            mqtt_port=_get_int("MQTT_PORT", 1883),
+            mqtt_username=_get_str("MQTT_USERNAME", "camera"),
+            mqtt_password=_get_str("MQTT_PASSWORD"),
             camera_index=_get_int("CAMERA_INDEX", 0),
             camera_width=_get_int("CAMERA_WIDTH", 1280),
             camera_height=_get_int("CAMERA_HEIGHT", 720),
@@ -136,7 +133,6 @@ class Settings:
             min_sharpness=_get_float("MIN_SHARPNESS", 60.0),
             continuous_batch_size=_get_int("CONTINUOUS_BATCH_SIZE", 5),
             continuous_min_interval_seconds=_get_float("CONTINUOUS_MIN_INTERVAL_SECONDS", 600.0),
-            max_continuous_embeddings=_get_int("MAX_CONTINUOUS_EMBEDDINGS", 20),
             top_k_neighbors=_get_int("TOP_K_NEIGHBORS", 5),
         )
         settings._validate()
@@ -144,8 +140,10 @@ class Settings:
 
     def _validate(self) -> None:
         """Verifica che i valori siano coerenti tra loro."""
-        if self.db_password in PLACEHOLDER_PASSWORDS:
-            raise ConfigurationError("Imposta una DB_PASSWORD personale nel file .env")
+        if self.mqtt_password in PLACEHOLDER_PASSWORDS:
+            raise ConfigurationError(
+                "Imposta in MQTT_PASSWORD la password dell'utente camera (MQTT_CAMERA_PASSWORD nel .env del server)"
+            )
 
         for label, value in (
             ("YOLO_CONFIDENCE", self.yolo_confidence),
@@ -161,8 +159,8 @@ class Settings:
             )
         if not 5 <= self.enrollment_samples <= 10:
             raise ConfigurationError("ENROLLMENT_SAMPLES deve essere compreso tra 5 e 10")
-        if not 1 <= self.db_port <= 65535:
-            raise ConfigurationError("DB_PORT deve essere compreso tra 1 e 65535")
+        if not 1 <= self.mqtt_port <= 65535:
+            raise ConfigurationError("MQTT_PORT deve essere compreso tra 1 e 65535")
 
         for label, value in (
             ("CAMERA_WIDTH", self.camera_width),
@@ -171,7 +169,6 @@ class Settings:
             ("INSIGHTFACE_DET_SIZE", self.insightface_det_size),
             ("MIN_FACE_WIDTH_PX", self.min_face_width_px),
             ("CONTINUOUS_BATCH_SIZE", self.continuous_batch_size),
-            ("MAX_CONTINUOUS_EMBEDDINGS", self.max_continuous_embeddings),
             ("TOP_K_NEIGHBORS", self.top_k_neighbors),
         ):
             if value < 1:

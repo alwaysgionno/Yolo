@@ -6,7 +6,7 @@ import unittest
 
 from app.enrollment import ENTER_KEYS, ESC_KEY, EnrollmentSession, EnrollmentState
 from app.models import Match
-from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings, other_person_vector
+from tests.helpers import FakeClock, FakeStore, face_vector, make_detection, make_settings, other_person_vector
 
 ENTER = ENTER_KEYS[1]
 BACKSPACE = 8
@@ -15,7 +15,7 @@ BACKSPACE = 8
 class EnrollmentTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
-        self.db = FakeDatabase()
+        self.db = FakeStore()
         self.session = EnrollmentSession(make_settings(), self.db, clock=self.clock)
 
     def type_name(self, name: str) -> None:
@@ -52,7 +52,7 @@ class StartTest(EnrollmentTestCase):
 
     def test_interruption_restarts_the_confirmation(self) -> None:
         unknown = [make_detection()]
-        known = [make_detection(match=Match(1, "Anna", 0.7))]
+        known = [make_detection(match=Match("uid-mario", "Anna", 0.7))]
         someone_else = [make_detection(other_person_vector())]
         interruptions = {"volto riconosciuto": known, "nessun volto": [], "altra persona": someone_else}
         for label, interruption in interruptions.items():
@@ -73,7 +73,7 @@ class StartTest(EnrollmentTestCase):
         self.assertIs(self.session.state, EnrollmentState.IDLE)
 
     def test_known_person_in_view_does_not_block_the_proposal(self) -> None:
-        scene = [make_detection(other_person_vector(), match=Match(1, "Anna", 0.7)), make_detection()]
+        scene = [make_detection(other_person_vector(), match=Match("uid-mario", "Anna", 0.7)), make_detection()]
         results = [self.observe(scene) for _ in range(4)]
         self.assertEqual(results, [False, False, False, True])
 
@@ -113,7 +113,7 @@ class NameInputTest(EnrollmentTestCase):
         self.session.start(make_detection())
         self.type_name("Mario ROSSI")
         self.assertIs(self.session.state, EnrollmentState.NAME_INPUT)
-        self.assertIn("gia presente", self.session.error)
+        self.assertIn("gia registrato", self.session.error)
 
     def test_name_is_cleaned_and_backspace_works(self) -> None:
         self.session.start(make_detection())
@@ -135,18 +135,18 @@ class NameInputTest(EnrollmentTestCase):
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
         self.assertIn("Tempo scaduto", self.session.error)
 
-    def test_database_failure_cancels(self) -> None:
+    def test_missing_gallery_cancels(self) -> None:
         self.db.failing.add("person_exists")
         self.session.start(make_detection())
         self.type_name("Mario")
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
-        self.assertEqual(self.session.error, "Database non disponibile")
+        self.assertEqual(self.session.error, "Elenco delle persone non disponibile")
 
 
 class FollowedFaceTest(EnrollmentTestCase):
     """La richiesta del nome resta legata al volto che l'ha fatta comparire."""
 
-    KNOWN = Match(1, "Anna", 0.7)
+    KNOWN = Match("uid-mario", "Anna", 0.7)
 
     def test_prompt_is_withdrawn_when_the_face_leaves_before_typing(self) -> None:
         self.session.start(make_detection())
@@ -213,7 +213,7 @@ class CaptureTest(EnrollmentTestCase):
 
         self.offer_valid_samples(5)  # i primi quattro sono doppioni scartati, il quinto completa il profilo
         self.assertIs(self.session.state, EnrollmentState.COMPLETED)
-        self.assertEqual(self.session.person_id, 1)
+        self.assertEqual(self.session.person_id, "uid-1")
         self.assertEqual(len(self.db.created), 1)
         name, embeddings, qualities = self.db.created[0]
         self.assertEqual(name, "Mario Rossi")
@@ -225,7 +225,7 @@ class CaptureTest(EnrollmentTestCase):
         cases = [
             ([], "Nessun volto"),
             ([make_detection(other_person_vector())], "Volto diverso"),
-            ([make_detection(match=Match(7, "Anna", 0.8))], "gia registrato come Anna"),
+            ([make_detection(match=Match("uid-anna", "Anna", 0.8))], "gia registrato come Anna"),
             ([make_detection(face_width=50.0)], "Avvicinati"),
             ([make_detection(sharpness=10.0)], "sfocata (10/60)"),
         ]
@@ -260,7 +260,7 @@ class CaptureTest(EnrollmentTestCase):
     def test_face_recognised_during_capture_cancels_without_saving(self) -> None:
         self.begin_capture()
         self.offer_valid_samples(2)
-        known = [make_detection(match=Match(7, "Anna", 0.8))]
+        known = [make_detection(match=Match("uid-anna", "Anna", 0.8))]
         self.session.offer_frame(known)
         self.assertIs(self.session.state, EnrollmentState.CAPTURING)
         self.assertEqual(self.session.progress[0], 2)  # il fotogramma "riconosciuto" non diventa un campione
@@ -288,7 +288,7 @@ class CaptureTest(EnrollmentTestCase):
         self.begin_capture()
         self.offer_valid_samples(5)
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
-        self.assertIn("Salvataggio", self.session.error)
+        self.assertIn("Invio del profilo", self.session.error)
         self.assertIsNone(self.session.person_id)
 
 

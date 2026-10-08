@@ -14,11 +14,13 @@ import numpy as np
 
 from .camera_stream import CameraStream
 from .config import ConfigurationError, Settings
-from .database_manager import DatabaseError, DatabaseManager
+from .person_store import PersonStore
 from .enrollment import EnrollmentSession, EnrollmentState
 from .face_processor import FaceProcessor
+from .gallery import Gallery
 from .inference_worker import InferenceWorker
 from .models import FrameResult, Greeting, GreetingKind
+from .mqtt_link import MqttLink
 from .recognition_service import RecognitionService
 from .ui_controller import NO_KEY, UIController
 
@@ -41,17 +43,15 @@ class FaceAccessApp:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._database = DatabaseManager(settings)
-        try:
-            self._camera = CameraStream(settings.camera_index, settings.camera_width, settings.camera_height)
-            self._processor = FaceProcessor(settings)
-            self._recognizer = RecognitionService(settings, self._database)
-            self._worker = InferenceWorker(self._camera, self._processor, self._recognizer)
-            self._enrollment = EnrollmentSession(settings, self._database)
-            self._ui = UIController(settings.camera_width, settings.camera_height)
-        except BaseException:
-            self._database.close()
-            raise
+        gallery = Gallery()
+        self._link = MqttLink(settings, gallery)
+        store = PersonStore(gallery, self._link)
+        self._camera = CameraStream(settings.camera_index, settings.camera_width, settings.camera_height)
+        self._processor = FaceProcessor(settings)
+        self._recognizer = RecognitionService(settings, store)
+        self._worker = InferenceWorker(self._camera, self._processor, self._recognizer)
+        self._enrollment = EnrollmentSession(settings, store)
+        self._ui = UIController(settings.camera_width, settings.camera_height)
         self._ui_fps = 0.0
         # Id dell'ultimo fotogramma il cui risultato e stato valutato per la registrazione
         self._last_enrollment_frame_id = -1
@@ -59,6 +59,7 @@ class FaceAccessApp:
     def run(self) -> None:
         """Avvia i thread di servizio e rimane nel ciclo UI finche l'utente non esce."""
         try:
+            self._link.start()
             self._camera.start()
             self._worker.start()
             logger.info("Applicazione avviata. Premi Q per uscire.")
@@ -91,6 +92,7 @@ class FaceAccessApp:
                 result,
                 self._enrollment,
                 camera_connected,
+                self._link.server_online,
                 self._ui_fps,
                 self._worker.fps,
             )
@@ -132,8 +134,8 @@ class FaceAccessApp:
         """Avvia, alimenta e conclude la registrazione in base all'ultimo risultato di inferenza."""
         enrollment = self._enrollment
 
-        # 1. Ogni risultato di inferenza viene valutato una sola volta, e solo se il database ha risposto
-        if result is not None and result.db_ok and result.frame_id > self._last_enrollment_frame_id:
+        # 1. Ogni risultato di inferenza viene valutato una sola volta, e solo se i volti sono stati confrontati
+        if result is not None and result.gallery_ok and result.frame_id > self._last_enrollment_frame_id:
             self._last_enrollment_frame_id = result.frame_id
             if enrollment.is_active:
                 # Si segue il volto in registrazione: durante la cattura fornisce i campioni
@@ -158,12 +160,12 @@ class FaceAccessApp:
             enrollment.reset()
 
     def _shutdown(self) -> None:
-        """Chiude in ordine thread, finestre e connessioni al database."""
+        """Chiude in ordine thread, finestre e collegamento con il server."""
         logger.info("Chiusura in corso...")
         self._worker.stop()
         self._camera.stop()
         self._ui.destroy()
-        self._database.close()
+        self._link.close()
         logger.info("Applicazione chiusa")
 
 
@@ -188,7 +190,7 @@ def main() -> int:
     try:
         settings = Settings.from_env()
         app = FaceAccessApp(settings)
-    except (ConfigurationError, DatabaseError) as exc:
+    except ConfigurationError as exc:
         logger.error("Avvio non riuscito: %s", exc)
         return 1
     except KeyboardInterrupt:

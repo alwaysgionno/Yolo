@@ -14,7 +14,7 @@ from collections.abc import Callable
 import numpy as np
 
 from .config import Settings
-from .database_manager import DatabaseError, DatabaseManager
+from .person_store import PersonStore, StoreError
 from .greeting_policy import GreetingPolicy
 from .models import FaceDetection, Greeting, GreetingKind, Match
 
@@ -27,25 +27,25 @@ class RecognitionService:
     def __init__(
         self,
         settings: Settings,
-        database: DatabaseManager,
+        store: PersonStore,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
-        self._db = database
+        self._store = store
         self._clock = clock
         self._greeting_policy = GreetingPolicy(settings.welcome_back_absence_seconds, clock)
 
         # Stato dell'apprendimento continuo. Ogni buffer contiene coppie (embedding, nitidezza).
-        self._learning_buffers: dict[int, list[tuple[np.ndarray, float]]] = defaultdict(list)
-        self._last_learning_update: dict[int, float] = {}
+        self._learning_buffers: dict[str, list[tuple[np.ndarray, float]]] = defaultdict(list)
+        self._last_learning_update: dict[str, float] = {}
 
     def process(self, detections: list[FaceDetection]) -> list[Greeting]:
         """Identifica ogni volto e restituisce i saluti dovuti in questo fotogramma.
 
         Raises:
-            DatabaseError: se il database non risponde durante la ricerca.
+            StoreError: se la galleria non e ancora arrivata dal server.
         """
-        # Prima si identificano tutti i volti: se il database non risponde l'errore emerge
+        # Prima si identificano tutti i volti: se la galleria non e disponibile l'errore emerge
         # qui, quando nessun saluto e ancora stato consumato senza poter essere mostrato.
         for detection in detections:
             detection.match = self._identify(detection)
@@ -66,17 +66,17 @@ class RecognitionService:
         """Restituisce la persona registrata piu simile al volto, se supera la soglia di riconoscimento."""
         if detection.embedding is None:
             return None
-        candidates = self._db.find_nearest(detection.embedding, self._settings.top_k_neighbors)
+        candidates = self._store.find_nearest(detection.embedding, self._settings.top_k_neighbors)
         if not candidates or candidates[0].similarity < self._settings.recognition_threshold:
             return None
         return candidates[0]
 
     def _record_access(self, match: Match, kind: GreetingKind) -> None:
-        """Registra l'accesso nel database. Un errore DB non blocca il saluto a schermo."""
+        """Invia l'accesso al server. Un evento non accodato non blocca il saluto a schermo."""
         try:
-            self._db.record_greeting(match.person_id, match.similarity)
-        except DatabaseError as exc:
-            logger.error("Accesso di %s non registrato nel database: %s", match.full_name, exc)
+            self._store.record_greeting(match.person_id, match.similarity)
+        except StoreError as exc:
+            logger.error("Accesso di %s non inviato al server: %s", match.full_name, exc)
         logger.info("Saluto %s: %s (similarita %.2f)", kind.name, match.full_name, match.similarity)
 
     def _learn_if_confident(self, detection: FaceDetection, match: Match) -> None:
@@ -107,13 +107,12 @@ class RecognitionService:
             return
 
         try:
-            self._db.add_continuous_embedding(
+            self._store.add_continuous_embedding(
                 match.person_id,
                 (mean_vector / norm).astype(np.float32),
                 quality=mean_quality,
-                max_stored=settings.max_continuous_embeddings,
             )
-        except DatabaseError as exc:
+        except StoreError as exc:
             logger.error("Apprendimento continuo non riuscito per %s: %s", match.full_name, exc)
             return
         self._last_learning_update[match.person_id] = now

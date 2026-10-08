@@ -4,7 +4,7 @@ Flusso (macchina a stati gestita dal thread della UI):
 
     IDLE -> NAME_INPUT (l'utente digita il nome)
          -> CAPTURING (acquisizione di 5-10 campioni validi)
-         -> COMPLETED (salvataggio nel database)   oppure   CANCELLED (annullato o scaduto)
+         -> COMPLETED (profilo inviato al server)   oppure   CANCELLED (annullato o scaduto)
 
 La sessione segue un solo volto, quello scelto dal NewFaceSelector: gli altri volti
 presenti nel fotogramma vengono ignorati.
@@ -20,7 +20,7 @@ from enum import Enum, auto
 import numpy as np
 
 from .config import Settings
-from .database_manager import DatabaseError, DatabaseManager
+from .person_store import PersonStore, StoreError
 from .models import FaceDetection
 from .new_face_selector import NewFaceSelector, find_same_face
 
@@ -57,11 +57,11 @@ class EnrollmentSession:
     def __init__(
         self,
         settings: Settings,
-        database: DatabaseManager,
+        store: PersonStore,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
-        self._db = database
+        self._store = store
         self._clock = clock
         self._selector = NewFaceSelector(settings, clock)
 
@@ -69,7 +69,7 @@ class EnrollmentSession:
         self.name = ""
         self.feedback = ""       # suggerimento mostrato durante la cattura
         self.error = ""          # motivo dell'ultimo errore o annullamento
-        self.person_id: int | None = None
+        self.person_id: str | None = None
 
         self._samples: list[np.ndarray] = []
         self._qualities: list[float] = []
@@ -236,23 +236,23 @@ class EnrollmentSession:
             self.error = f"Il nome deve avere almeno {MIN_NAME_LENGTH} caratteri"
             return
         try:
-            if self._db.person_exists(name):
-                self.error = "Nome gia presente nel database"
+            if self._store.person_exists(name):
+                self.error = "Nome gia registrato"
                 return
-        except DatabaseError as exc:
+        except StoreError as exc:
             logger.error("Verifica del nome non riuscita: %s", exc)
-            self._cancel("Database non disponibile", snooze=True)
+            self._cancel("Elenco delle persone non disponibile", snooze=True)
             return
         self.name = name
         self._set_state(EnrollmentState.CAPTURING)
 
     def _save(self) -> None:
-        """Salva la persona e i campioni nel database."""
+        """Registra la persona con i suoi campioni: galleria locale subito, database tramite il server."""
         try:
-            self.person_id = self._db.create_person(self.name, self._samples, self._qualities)
-        except DatabaseError as exc:
+            self.person_id = self._store.create_person(self.name, self._samples, self._qualities)
+        except StoreError as exc:
             logger.error("Salvataggio del profilo non riuscito: %s", exc)
-            self._cancel("Salvataggio nel database fallito", snooze=True)
+            self._cancel("Invio del profilo al server fallito", snooze=True)
             return
         self._set_state(EnrollmentState.COMPLETED)
 

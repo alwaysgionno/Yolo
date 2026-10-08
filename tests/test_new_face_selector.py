@@ -17,7 +17,7 @@ from tests.helpers import (
     other_person_vector,
 )
 
-KNOWN = Match(1, "Anna", 0.7)
+KNOWN = Match("uid-mario", "Anna", 0.7)
 
 
 class NewFaceSelectorTest(unittest.TestCase):
