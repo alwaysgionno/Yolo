@@ -10,6 +10,7 @@ a schermo sono scritti senza accenti.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -21,6 +22,7 @@ WINDOW_NAME = "Face Access"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 COLOR_KNOWN = (80, 200, 80)      # BGR: verde
 COLOR_UNKNOWN = (60, 60, 230)    # BGR: rosso
+COLOR_ENROLLING = (0, 170, 255)  # BGR: arancione, volto in registrazione
 COLOR_UNVERIFIED = (150, 150, 150)
 COLOR_TOAST = (40, 120, 40)
 COLOR_TEXT = (255, 255, 255)
@@ -29,6 +31,18 @@ NO_KEY = 255                     # valore restituito da waitKey quando non viene
 MIN_FONT_SCALE = 0.35
 SCREEN_MARGIN = 10
 STATUS_BAR_HEIGHT = 24
+TOAST_TOP_Y = 70                 # linea di base del primo messaggio temporaneo
+TOAST_SPACING = 66               # distanza verticale tra due messaggi impilati
+MAX_VISIBLE_TOASTS = 3
+
+
+@dataclass
+class _Toast:
+    """Messaggio temporaneo. La durata decorre da quando diventa visibile."""
+
+    text: str
+    seconds: float
+    expires_at: float | None = None
 
 
 class UIController:
@@ -36,16 +50,16 @@ class UIController:
 
     def __init__(self, window_width: int, window_height: int, toast_seconds: float = 4.0) -> None:
         self._toast_seconds = toast_seconds
-        self._toast_text = ""
-        self._toast_until = 0.0
+        self._toasts: list[_Toast] = []
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
         cv2.resizeWindow(WINDOW_NAME, window_width, window_height)
 
     def show_toast(self, text: str, seconds: float | None = None) -> None:
-        """Mostra un messaggio temporaneo in alto, ad esempio il saluto personalizzato."""
-        self._toast_text = text
-        duration = seconds if seconds is not None else self._toast_seconds
-        self._toast_until = time.monotonic() + duration
+        """Accoda un messaggio temporaneo in alto, ad esempio il saluto personalizzato.
+
+        I messaggi non si sovrascrivono: vengono impilati e ognuno resta visibile per tutta la sua durata.
+        """
+        self._toasts.append(_Toast(text, seconds if seconds is not None else self._toast_seconds))
 
     def render(
         self,
@@ -60,15 +74,16 @@ class UIController:
         canvas = frame.copy()
 
         if result is not None:
+            candidate = enrollment.candidate_in(result.detections)
             for detection in result.detections:
-                _draw_detection(canvas, detection, verified=result.db_ok)
+                _draw_detection(canvas, detection, verified=result.db_ok, enrolling=detection is candidate)
 
         if enrollment.state is EnrollmentState.NAME_INPUT:
             _draw_name_prompt(canvas, enrollment)
         elif enrollment.state is EnrollmentState.CAPTURING:
             _draw_capture_progress(canvas, enrollment)
 
-        self._draw_toast(canvas)
+        self._draw_toasts(canvas)
         if not camera_connected:
             _draw_centered_message(canvas, "Webcam non disponibile: riconnessione in corso...")
 
@@ -98,22 +113,30 @@ class UIController:
         """Chiude tutte le finestre OpenCV."""
         cv2.destroyAllWindows()
 
-    def _draw_toast(self, canvas: np.ndarray) -> None:
-        if not self._toast_text or time.monotonic() >= self._toast_until:
-            return
-        width = canvas.shape[1]
-        scale = _fit_font_scale([self._toast_text], width - 2 * (SCREEN_MARGIN + 20), 1.0)
-        (text_w, text_h), baseline = cv2.getTextSize(self._toast_text, FONT, scale, 2)
-        x = max(SCREEN_MARGIN + 20, (width - text_w) // 2)
-        y = 70
-        cv2.rectangle(
-            canvas,
-            (x - 20, y - text_h - 16),
-            (x + text_w + 20, y + baseline + 14),
-            COLOR_TOAST,
-            cv2.FILLED,
-        )
-        cv2.putText(canvas, self._toast_text, (x, y), FONT, scale, COLOR_TEXT, 2, cv2.LINE_AA)
+    def _draw_toasts(self, canvas: np.ndarray) -> None:
+        """Disegna i messaggi attivi, impilati dal piu vecchio; quelli in eccesso attendono il loro turno."""
+        now = time.monotonic()
+        self._toasts = [toast for toast in self._toasts if toast.expires_at is None or now < toast.expires_at]
+        for slot, toast in enumerate(self._toasts[:MAX_VISIBLE_TOASTS]):
+            if toast.expires_at is None:
+                toast.expires_at = now + toast.seconds
+            _draw_toast(canvas, toast.text, TOAST_TOP_Y + slot * TOAST_SPACING)
+
+
+def _draw_toast(canvas: np.ndarray, text: str, y: int) -> None:
+    """Messaggio su sfondo colorato, centrato in orizzontale, con la linea di base a quota `y`."""
+    width = canvas.shape[1]
+    scale = _fit_font_scale([text], width - 2 * (SCREEN_MARGIN + 20), 1.0)
+    (text_w, text_h), baseline = cv2.getTextSize(text, FONT, scale, 2)
+    x = max(SCREEN_MARGIN + 20, (width - text_w) // 2)
+    cv2.rectangle(
+        canvas,
+        (x - 20, y - text_h - 16),
+        (x + text_w + 20, y + baseline + 14),
+        COLOR_TOAST,
+        cv2.FILLED,
+    )
+    cv2.putText(canvas, text, (x, y), FONT, scale, COLOR_TEXT, 2, cv2.LINE_AA)
 
 
 def _fit_font_scale(lines: list[str], max_width: int, font_scale: float, thickness: int = 2) -> float:
@@ -124,9 +147,10 @@ def _fit_font_scale(lines: list[str], max_width: int, font_scale: float, thickne
     return max(MIN_FONT_SCALE, font_scale * max_width / widest)
 
 
-def _draw_detection(canvas: np.ndarray, detection: FaceDetection, verified: bool) -> None:
+def _draw_detection(canvas: np.ndarray, detection: FaceDetection, verified: bool, enrolling: bool = False) -> None:
     """Disegna il riquadro del volto con nome e similarita (verde) o 'Sconosciuto' (rosso).
 
+    Il volto seguito dalla registrazione in corso (`enrolling`) e mostrato in arancione.
     Se il database non ha risposto (`verified` False) il volto non e stato confrontato:
     viene mostrato in grigio, senza indicarlo come sconosciuto.
     """
@@ -134,6 +158,9 @@ def _draw_detection(canvas: np.ndarray, detection: FaceDetection, verified: bool
     if detection.match is not None:
         color = COLOR_KNOWN
         label = f"{detection.match.full_name} {detection.match.similarity:.2f}"
+    elif enrolling:
+        color = COLOR_ENROLLING
+        label = "In registrazione"
     elif not verified:
         color = COLOR_UNVERIFIED
         label = "Non verificato"

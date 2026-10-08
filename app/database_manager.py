@@ -126,10 +126,14 @@ class DatabaseManager:
         """Restituisce le `limit` corrispondenze piu vicine, ordinate per similarita decrescente.
 
         La similarita coseno e calcolata come 1 - distanza coseno (operatore <=> di pgvector).
+        Ogni corrispondenza riporta anche i secondi trascorsi dall'ultimo accesso della persona,
+        calcolati con l'orologio del database (None se non e mai stata salutata).
         """
         vector = to_pgvector(embedding)
         query = """
-            SELECT p.id, p.full_name, 1 - (fe.embedding <=> %(vec)s::vector) AS similarity
+            SELECT p.id, p.full_name,
+                   1 - (fe.embedding <=> %(vec)s::vector) AS similarity,
+                   EXTRACT(EPOCH FROM (NOW() - p.last_access_at)) AS last_access_age_s
             FROM face_embeddings AS fe
             JOIN persons AS p ON p.id = fe.person_id
             WHERE p.is_active
@@ -139,7 +143,12 @@ class DatabaseManager:
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(query, {"vec": vector, "limit": limit})
             return [
-                Match(person_id=int(row[0]), full_name=str(row[1]), similarity=float(row[2]))
+                Match(
+                    person_id=int(row[0]),
+                    full_name=str(row[1]),
+                    similarity=float(row[2]),
+                    last_access_age_s=float(row[3]) if row[3] is not None else None,
+                )
                 for row in cur.fetchall()
             ]
 
@@ -149,7 +158,11 @@ class DatabaseManager:
         embeddings: Sequence[np.ndarray],
         qualities: Sequence[float],
     ) -> int:
-        """Crea la persona, salva i suoi embedding iniziali e registra l'evento, in un'unica transazione."""
+        """Crea la persona, salva i suoi embedding iniziali e registra l'evento, in un'unica transazione.
+
+        La registrazione vale come primo accesso: `last_access_at` viene valorizzato subito, cosi
+        la persona appena accolta con "Benvenuto" non riceve un secondo saluto al primo riconoscimento.
+        """
         if not embeddings:
             raise ValueError("Serve almeno un embedding per registrare una persona")
         if len(embeddings) != len(qualities):
@@ -157,7 +170,11 @@ class DatabaseManager:
         rows = [(to_pgvector(emb), float(quality)) for emb, quality in zip(embeddings, qualities)]
         with self._connection() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO persons (full_name, sample_count) VALUES (%s, %s) RETURNING id",
+                """
+                INSERT INTO persons (full_name, sample_count, last_access_at)
+                VALUES (%s, %s, NOW())
+                RETURNING id
+                """,
                 (full_name, len(rows)),
             )
             person_id = int(cur.fetchone()[0])

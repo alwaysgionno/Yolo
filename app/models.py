@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 import numpy as np
 
@@ -18,6 +19,22 @@ class Match:
     person_id: int
     full_name: str
     similarity: float  # tra -1 e 1; 1 significa vettori identici
+    last_access_age_s: float | None = None  # secondi dall'ultimo accesso salvato; None se mai salutata
+
+
+class GreetingKind(Enum):
+    """Tipo di saluto dovuto a una persona riconosciuta."""
+
+    WELCOME = auto()       # "Benvenuto": primo riconoscimento in assoluto
+    WELCOME_BACK = auto()  # "Bentornato": rientro dopo un'assenza dal campo visivo
+
+
+@dataclass(frozen=True)
+class Greeting:
+    """Saluto deciso dal thread di inferenza e mostrato dal thread della UI."""
+
+    kind: GreetingKind
+    full_name: str
 
 
 @dataclass

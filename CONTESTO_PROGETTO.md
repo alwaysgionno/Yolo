@@ -12,9 +12,9 @@ Applicazione desktop in Python, sviluppata in Visual Studio Code, che usa la web
 
 1. **Architettura concorrente.** Cattura webcam, inferenza AI e interfaccia grafica girano in thread distinti. L'AI non deve mai bloccare il video.
 2. **Pipeline di riconoscimento.** YOLOv8 rileva il volto nel fotogramma. Il ritaglio viene passato a InsightFace (ArcFace), che produce un embedding a 512 dimensioni. Il confronto avviene in PostgreSQL con pgvector, usando la distanza coseno.
-3. **Nuovi volti.** Se la similarità massima è sotto `RECOGNITION_THRESHOLD`, un overlay OpenCV chiede il nome. Poi vengono acquisiti da 5 a 10 campioni validi (`ENROLLMENT_SAMPLES`, predefinito 8).
+3. **Nuovi volti.** Se la similarità massima è sotto `RECOGNITION_THRESHOLD` il volto è sconosciuto. Quando lo stesso volto sconosciuto resta nell'inquadratura per più risultati di inferenza consecutivi, un overlay OpenCV chiede il nome. Poi vengono acquisiti da 5 a 10 campioni validi (`ENROLLMENT_SAMPLES`, predefinito 8).
 4. **Apprendimento continuo.** I riconoscimenti con similarità sopra `CONTINUOUS_LEARNING_THRESHOLD` arricchiscono il profilo. Gli embedding vengono mediati a gruppi e salvati come nuovi campioni.
-5. **Saluto e debouncing.** Viene mostrato "Bentornato, Nome!". Ogni persona viene salutata al massimo una volta ogni `GREETING_COOLDOWN_SECONDS` (predefinito 300). Ogni saluto aggiorna `persons.last_access_at` e scrive una riga in `access_logs`.
+5. **Saluti.** "Benvenuto, Nome!" compare una sola volta, al primo riconoscimento della persona, che di norma coincide con la registrazione. "Bentornato, Nome!" compare solo quando la persona rientra nel campo visivo dopo un'assenza di almeno `WELCOME_BACK_ABSENCE_SECONDS` (predefinito 600), misurata dall'ultimo avvistamento. Ogni saluto aggiorna `persons.last_access_at` e scrive una riga in `access_logs`.
 6. **Database.** Tabelle `persons`, `face_embeddings` (VECTOR(512), indice HNSW coseno) e `access_logs`. Avvio con `docker-compose.yml`. Ispezione con DBeaver.
 
 ## 3. Stack tecnologico
@@ -35,14 +35,16 @@ Le versioni sono in `requirements.txt`, con la spiegazione di ogni libreria.
               ▼
             InferenceWorker (thread "InferenceWorker")
               │  FaceProcessor:      YOLO → ritaglio con margine → InsightFace
-              │  RecognitionService: find_nearest (pgvector), soglia, saluto, apprendimento
+              │  RecognitionService: find_nearest (pgvector), soglia, apprendimento
+              │  GreetingPolicy:     presenza per persona, "Benvenuto" / "Bentornato"
               ▼
             FrameResult (ultimo risultato, protetto da lock) + coda dei saluti
               │
               ▼
             FaceAccessApp (thread principale)
-              │  UIController:      disegno OpenCV, toast, barra di stato
+              │  UIController:      disegno OpenCV, toast impilati, barra di stato
               │  EnrollmentSession: macchina a stati della registrazione
+              │  NewFaceSelector:   scelta e conferma del volto sconosciuto (usato dalla sessione)
               └─ tasti: Q esce, ESC annulla, INVIO conferma il nome
 ```
 
@@ -50,7 +52,7 @@ Regole da rispettare:
 - `imshow` e `waitKey` vanno chiamati solo dal thread principale.
 - YOLO e InsightFace vengono usati solo dal worker di inferenza.
 - Il pool di connessioni PostgreSQL è thread-safe e viene usato da worker e thread principale. Tiene sempre aperte due connessioni, una per ciascun thread; una connessione caduta viene scartata e riaperta alla richiesta successiva.
-- `RecognitionService` ha lo stato dei saluti protetto da lock, perché `register_greeting` viene chiamato dal thread principale.
+- Lo stato dei saluti (`GreetingPolicy`) è usato solo dal worker di inferenza: i saluti arrivano alla UI attraverso la coda dell'`InferenceWorker`, senza lock condivisi e senza chiamate dal thread principale.
 - Il ciclo UI attende il fotogramma successivo (`CameraStream.wait_for_frame`, al massimo 50 ms): gira alla velocità della webcam e non sottrae CPU all'inferenza.
 - Ogni `FrameResult` viene valutato per la registrazione una sola volta (confronto sul `frame_id`). I risultati più vecchi di 3 secondi, o arrivati mentre la webcam è scollegata, non vengono né disegnati né usati.
 
@@ -63,17 +65,20 @@ Regole da rispettare:
    - Con il modello generico il ritaglio è una persona intera e può contenere anche i volti dei vicini: si tengono tutti, e a schermo viene mostrato il riquadro del volto.
    - Un volto che tocca un bordo interno del ritaglio è tagliato a metà e viene scartato: il suo embedding sarebbe inaffidabile.
    - Se più regioni portano allo stesso volto (IoU sopra 0.4), resta la versione con `det_score` più alto.
-4. `find_nearest`: `SELECT ... ORDER BY embedding <=> vettore LIMIT TOP_K_NEIGHBORS`. La similarità è `1 - distanza coseno`.
+4. `find_nearest`: `SELECT ... ORDER BY embedding <=> vettore LIMIT TOP_K_NEIGHBORS`. La similarità è `1 - distanza coseno`. Ogni corrispondenza riporta anche i secondi trascorsi da `last_access_at` (`Match.last_access_age_s`, `None` se la persona non è mai stata salutata).
 5. Se la migliore similarità è maggiore o uguale a `RECOGNITION_THRESHOLD`, la persona è riconosciuta. Altrimenti è sconosciuta.
 
-## 6. Registrazione (EnrollmentSession)
+## 6. Registrazione (EnrollmentSession e NewFaceSelector)
 
 Stati: `IDLE → NAME_INPUT → CAPTURING → COMPLETED | CANCELLED`.
 
-- **Avvio (`consider_start`):** solo con un unico volto nel fotogramma, sconosciuto, largo almeno `MIN_FACE_WIDTH_PX`, e fuori dal periodo di snooze (`UNKNOWN_SNOOZE_SECONDS`, predefinito 60 secondi dopo un annullamento). La condizione deve valere per almeno 3 risultati di inferenza consecutivi e per `UNKNOWN_CONFIRM_SECONDS` (predefinito 1.5): un singolo fotogramma mosso o di profilo non fa comparire la richiesta del nome.
-- **Nome:** almeno 2 caratteri, senza duplicati (confronto senza distinzione di maiuscole). Timeout di 60 secondi.
-- **Campione valido (`offer_frame` / `offer_detection`):** un solo volto nel fotogramma, non riconosciuto come persona già registrata, `face_width ≥ MIN_FACE_WIDTH_PX` (90), nitidezza `≥ MIN_SHARPNESS` (60), similarità con il primo campione `≥ 0.50` (stessa persona), similarità con gli altri campioni `≤ 0.985` (varietà), intervallo minimo di 0.4 secondi tra due campioni. Timeout di 30 secondi per la cattura.
-- **Salvataggio:** una sola transazione che inserisce la riga in `persons`, gli embedding con `source='enrollment'` e la riga `ENROLLED` in `access_logs`.
+- **Selezione (`NewFaceSelector`):** tra i volti sconosciuti larghi almeno `MIN_FACE_WIDTH_PX` viene scelto il più vicino alla webcam (il più largo). Le persone note presenti nel fotogramma non bloccano la selezione.
+- **Conferma:** il volto scelto deve ricomparire, sempre sconosciuto, per almeno 3 risultati di inferenza consecutivi (`UNKNOWN_CONFIRM_RESULTS`) e per `UNKNOWN_CONFIRM_SECONDS` (predefinito 1.5). Il volto viene riconosciuto tra un risultato e l'altro confrontando gli embedding (`find_same_face`, similarità `≥ 0.50`). Se esce, si allontana, viene riconosciuto o lascia il posto a un'altra persona, il conteggio riparte: un singolo fotogramma mosso o di profilo non fa comparire la richiesta del nome.
+- **Avvio (`consider_start`):** quando il selettore conferma un volto, fuori dal periodo di snooze (`UNKNOWN_SNOOZE_SECONDS`, predefinito 60 secondi dopo un annullamento). La sessione riceve l'embedding del volto e da quel momento segue solo quello (`candidate_in`), ignorando gli altri. Nella UI il suo riquadro è arancione, "In registrazione".
+- **Nome:** almeno 2 caratteri, senza duplicati (confronto senza distinzione di maiuscole). Timeout di 60 secondi. Se il volto non viene visto per 10 secondi (`CANDIDATE_LOST_TIMEOUT_S`) prima che sia stato digitato un carattere, la richiesta viene ritirata senza snooze.
+- **Volto già registrato (`offer_frame`):** se il volto seguito viene riconosciuto come persona nota in 2 risultati consecutivi (`KNOWN_FACE_CONFIRMATIONS`), la registrazione viene annullata con snooze, sia durante il nome sia durante la cattura. I fotogrammi in cui risulta noto non diventano mai campioni.
+- **Campione valido (`offer_frame`):** il volto seguito, non riconosciuto come persona già registrata, `face_width ≥ MIN_FACE_WIDTH_PX` (90), nitidezza `≥ MIN_SHARPNESS` (60), similarità con il primo campione `≥ 0.50` (stessa persona), similarità con gli altri campioni `≤ 0.985` (varietà), intervallo minimo di 0.4 secondi tra due campioni. Timeout di 30 secondi per la cattura.
+- **Salvataggio:** una sola transazione che inserisce la riga in `persons` (con `last_access_at = NOW()`), gli embedding con `source='enrollment'` e la riga `ENROLLED` in `access_logs`. Al termine la UI mostra "Profilo creato. Benvenuto, Nome!".
 - **Dopo il salvataggio:** `FaceAccessApp` ignora i risultati di inferenza calcolati sui fotogrammi precedenti, che vedono ancora la persona come sconosciuta. Senza questo controllo la richiesta del nome ricomparirebbe subito.
 
 ## 7. Apprendimento continuo
@@ -86,9 +91,17 @@ Per ogni persona il servizio tiene in memoria un buffer di embedding con similar
 4. se i campioni `continuous` superano `MAX_CONTINUOUS_EMBEDDINGS` (20), elimina i più vecchi;
 5. ricalcola `persons.sample_count` contando gli embedding rimasti.
 
-## 8. Debouncing dei saluti
+## 8. Saluti (GreetingPolicy)
 
-`RecognitionService._claim_greeting` usa un dizionario `{person_id: istante dell'ultimo saluto}` protetto da lock. Il saluto è concesso solo se è trascorso `GREETING_COOLDOWN_SECONDS`. `register_greeting()` evita il doppio saluto subito dopo una registrazione.
+`GreetingPolicy.observe(person_id, last_access_age_s)` viene chiamato dal `RecognitionService` a ogni riconoscimento e tiene in memoria `{person_id: istante dell'ultimo avvistamento}`.
+
+- **Persona già vista in questa sessione:** conta solo l'assenza dal campo visivo. Se dall'ultimo avvistamento sono trascorsi almeno `WELCOME_BACK_ABSENCE_SECONDS` il saluto è "Bentornato", altrimenti nessun saluto. Chi resta davanti alla webcam aggiorna continuamente l'ultimo avvistamento e non viene più salutato.
+- **Primo avvistamento dopo l'avvio:** fa fede `persons.last_access_at`. Se è `NULL` la persona non è mai stata salutata e riceve "Benvenuto". Se è più vecchio di `WELCOME_BACK_ABSENCE_SECONDS` riceve "Bentornato". Altrimenti nessun saluto.
+- **Dopo la registrazione:** `create_person` valorizza `last_access_at`, quindi la persona appena accolta con "Benvenuto" non riceve un secondo saluto al primo riconoscimento. Non servono chiamate tra thread.
+
+`RecognitionService.process` identifica prima tutti i volti e solo dopo decide i saluti: un errore del database a metà fotogramma non consuma saluti che non potrebbero essere mostrati. I saluti viaggiano come oggetti `Greeting(kind, full_name)`; il testo viene composto dalla UI (`_greeting_texts` in `app/main.py`), un messaggio per tipo, al plurale se le persone sono più di una ("Bentornati, Mario e Anna!").
+
+I toast della UI sono in coda (`UIController.show_toast`): fino a 3 messaggi sono visibili impilati, gli altri attendono il loro turno, e ognuno resta a schermo per tutta la sua durata.
 
 ## 9. Schema del database (`sql/init.sql`)
 
@@ -110,7 +123,7 @@ Il database non contiene immagini, solo vettori e metadati.
 | INSIGHTFACE_MODEL / INSIGHTFACE_DET_SIZE | buffalo_l / 320 | Modello InsightFace e risoluzione del rilevatore interno (multiplo di 32) |
 | RECOGNITION_THRESHOLD | 0.40 | Soglia di riconoscimento (similarità coseno) |
 | CONTINUOUS_LEARNING_THRESHOLD | 0.55 | Soglia per l'apprendimento continuo (deve essere ≥ della soglia di riconoscimento) |
-| GREETING_COOLDOWN_SECONDS | 300 | Debouncing dei saluti |
+| WELCOME_BACK_ABSENCE_SECONDS | 600 | Assenza minima dal campo visivo prima di "Bentornato". Sostituisce `GREETING_COOLDOWN_SECONDS`, che non viene più letta |
 | UNKNOWN_SNOOZE_SECONDS | 60 | Attesa prima di riproporre una registrazione annullata |
 | UNKNOWN_CONFIRM_SECONDS | 1.5 | Tempo per cui un volto sconosciuto deve restare inquadrato prima della richiesta del nome |
 | ENROLLMENT_SAMPLES | 8 | Campioni per la registrazione (5–10) |
@@ -122,14 +135,16 @@ Il database non contiene immagini, solo vettori e metadati.
 ## 11. Mappa dei file
 
 - `app/config.py`: `Settings` (dataclass immutabile), validazione, `ConfigurationError`
-- `app/models.py`: `BBox`, `Match`, `FaceDetection`, `FrameResult`
+- `app/models.py`: `BBox`, `Match`, `FaceDetection`, `FrameResult`, `GreetingKind`, `Greeting`
 - `app/camera_stream.py`: `CameraStream`, thread di cattura con riconnessione
 - `app/face_processor.py`: `FaceProcessor`, pipeline YOLO + InsightFace, funzioni di ritaglio e nitidezza
 - `app/database_manager.py`: `DatabaseManager`, pool, query, `DatabaseError`, `to_pgvector`
-- `app/recognition_service.py`: `RecognitionService`, soglia, debouncing, apprendimento continuo
+- `app/recognition_service.py`: `RecognitionService`, soglia, saluti, apprendimento continuo
+- `app/greeting_policy.py`: `GreetingPolicy`, regole di "Benvenuto" e "Bentornato"
 - `app/inference_worker.py`: `InferenceWorker`, thread di inferenza, risultati, coda dei saluti
-- `app/enrollment.py`: `EnrollmentSession`, `EnrollmentState`, registrazione
-- `app/ui_controller.py`: `UIController`, disegno OpenCV, toast, pannelli
+- `app/new_face_selector.py`: `NewFaceSelector`, `find_same_face`, scelta e conferma del volto sconosciuto
+- `app/enrollment.py`: `EnrollmentSession`, `EnrollmentState`, registrazione del volto selezionato
+- `app/ui_controller.py`: `UIController`, disegno OpenCV, coda dei toast, pannelli
 - `app/main.py`: `FaceAccessApp` (composizione, ciclo UI, tasti) e `main()`
 - `tests/`: test `unittest` della logica, con database, orologio e volti simulati in `tests/helpers.py`. Si eseguono con `python -m unittest`
 - `sql/init.sql`, `docker-compose.yml`, `.env.example`, `.gitignore`, `requirements.txt`, `README.md`, `.vscode/launch.json`, `models/LEGGIMI.txt`
@@ -145,11 +160,14 @@ Il database non contiene immagini, solo vettori e metadati.
 ## 13. Limiti noti
 
 - Senza pesi `yolov8n-face.pt` si usa il rilevamento di persone: un volto viene trovato solo se YOLO riconosce la persona, e ogni persona in più nel fotogramma allunga l'inferenza (circa 0.2 secondi con una o due persone, 0.7 con sei).
-- Un volto già registrato, visto con similarità sotto soglia (occhiali, angolazione estrema, scarsa luce), viene trattato come sconosciuto. Se resta sotto soglia per tutta la durata della conferma e della cattura, il sistema può ancora proporre e completare una registrazione duplicata; se durante la cattura torna sopra soglia, i campioni vengono scartati.
+- Un volto già registrato, visto con similarità sotto soglia (occhiali, angolazione estrema, scarsa luce), viene trattato come sconosciuto. Se resta sotto soglia per tutta la durata della conferma e della cattura, il sistema può ancora proporre e completare una registrazione duplicata; se torna sopra soglia per due risultati consecutivi, la registrazione viene annullata.
 - I nomi si digitano solo con caratteri ASCII: niente lettere accentate, per il limite del font Hershey.
 - La porta di PostgreSQL è pubblicata solo su `127.0.0.1` (`docker-compose.yml`).
-- Il cooldown dei saluti è in memoria: al riavvio si azzera.
-- Non c'è tracking tra fotogrammi. Con più volti vengono riconosciuti tutti, ma la registrazione parte solo con un volto unico.
+- Gli avvistamenti sono in memoria: al riavvio si azzerano. Al primo avvistamento dopo l'avvio l'assenza viene stimata da `persons.last_access_at`, che registra l'ultimo saluto e non l'ultimo avvistamento: chi era stato salutato più di 10 minuti prima del riavvio riceve "Bentornato" anche se non si è mai allontanato.
+- Una persona presente ma non riconosciuta per più di 10 minuti (voltata, coperta) risulta assente: al riconoscimento successivo riceve "Bentornato".
+- I profili creati prima di questa versione e mai salutati hanno `last_access_at` nullo: al primo riconoscimento ricevono "Benvenuto", una sola volta.
+- Non c'è tracking tra fotogrammi: i volti vengono riallineati tra un risultato e l'altro confrontando gli embedding. Con più volti sconosciuti si registra una persona alla volta, partendo dalla più vicina.
+- Lo snooze dopo un annullamento è globale: per `UNKNOWN_SNOOZE_SECONDS` non viene proposta alcuna registrazione, nemmeno a un volto diverso.
 - Su CPU con 1280x720 l'inferenza gira a pochi fps, mentre il video resta fluido.
 - L'utente applicativo `face_app` è anche superutente del container: va bene in sviluppo, va ristretto in produzione.
 - Stato delle verifiche (8 ottobre 2026, Windows 11, Python 3.11.9, CPU):
@@ -157,6 +175,7 @@ Il database non contiene immagini, solo vettori e metadati.
   - le query sono state provate su PostgreSQL 16 con pgvector 0.8, compresi riavvio del database e query bloccate;
   - YOLO (modello generico) e InsightFace sono stati provati sulle immagini di esempio delle due librerie;
   - l'applicazione completa (finestra, tasti, thread, registrazione, riconoscimento, saluto, apprendimento continuo, caduta e ripresa di sorgente video e database) è stata provata con una sorgente video simulata: circa 30 fps di video e 8 fps di inferenza;
+  - le regole dei saluti ("Benvenuto" / "Bentornato"), la selezione del volto nuovo e i toast impilati sono stati provati con i test, con il ciclo UI reale alimentato da webcam, modelli e database simulati, e (`find_nearest`, `create_person`) su PostgreSQL 16 con pgvector 0.8; non con i modelli AI in esecuzione;
   - **non ancora provati:** la cattura da una webcam fisica (sul PC di prova non era presente nessuna fotocamera) e i pesi `yolov8n-face.pt`. Le soglie `MIN_SHARPNESS` e `MIN_FACE_WIDTH_PX` vanno quindi tarate con la webcam reale.
 - Aspetti GDPR e normativa sul lavoro: vedi la sezione 11 del README.
 
@@ -168,6 +187,7 @@ Il database non contiene immagini, solo vettori e metadati.
 - Cifratura degli embedding a riposo.
 - Ruoli utente, pannello di amministrazione e esportazione dei log.
 - Test di integrazione con un database PostgreSQL di test: quelli attuali simulano il database.
+- Snooze per singolo volto, per non bloccare gli altri sconosciuti dopo un annullamento.
 
 ## 15. Istruzioni per l'assistente
 

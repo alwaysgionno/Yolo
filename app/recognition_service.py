@@ -1,13 +1,12 @@
-"""Logica di riconoscimento: soglie, saluti con debouncing e apprendimento continuo.
+"""Logica di riconoscimento: soglie, saluti e apprendimento continuo.
 
-Il metodo `process` viene eseguito dal thread di inferenza. `register_greeting` puo
-essere chiamato anche dal thread della UI, quindi lo stato dei saluti e protetto da lock.
+Tutto lo stato del servizio viene usato solo dal thread di inferenza: i saluti
+raggiungono la UI attraverso la coda dell'InferenceWorker.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -16,7 +15,8 @@ import numpy as np
 
 from .config import Settings
 from .database_manager import DatabaseError, DatabaseManager
-from .models import FaceDetection, Match
+from .greeting_policy import GreetingPolicy
+from .models import FaceDetection, Greeting, GreetingKind, Match
 
 logger = logging.getLogger(__name__)
 
@@ -33,61 +33,51 @@ class RecognitionService:
         self._settings = settings
         self._db = database
         self._clock = clock
+        self._greeting_policy = GreetingPolicy(settings.welcome_back_absence_seconds, clock)
 
-        # Stato dei saluti: condiviso tra il thread di inferenza e quello della UI
-        self._greeting_lock = threading.Lock()
-        self._last_greeted: dict[int, float] = {}
-
-        # Stato dell'apprendimento continuo: usato solo dal thread di inferenza.
-        # Ogni buffer contiene coppie (embedding, nitidezza).
+        # Stato dell'apprendimento continuo. Ogni buffer contiene coppie (embedding, nitidezza).
         self._learning_buffers: dict[int, list[tuple[np.ndarray, float]]] = defaultdict(list)
         self._last_learning_update: dict[int, float] = {}
 
-    def process(self, detections: list[FaceDetection]) -> list[str]:
-        """Identifica ogni volto e restituisce i nomi delle persone da salutare in questo fotogramma.
+    def process(self, detections: list[FaceDetection]) -> list[Greeting]:
+        """Identifica ogni volto e restituisce i saluti dovuti in questo fotogramma.
 
         Raises:
             DatabaseError: se il database non risponde durante la ricerca.
         """
-        greeted: list[str] = []
+        # Prima si identificano tutti i volti: se il database non risponde l'errore emerge
+        # qui, quando nessun saluto e ancora stato consumato senza poter essere mostrato.
         for detection in detections:
-            if detection.embedding is None:
-                continue
+            detection.match = self._identify(detection)
 
-            candidates = self._db.find_nearest(detection.embedding, self._settings.top_k_neighbors)
-            if not candidates or candidates[0].similarity < self._settings.recognition_threshold:
+        greetings: list[Greeting] = []
+        for detection in detections:
+            match = detection.match
+            if match is None:
                 continue  # volto sconosciuto: sara la UI a proporre la registrazione
+            kind = self._greeting_policy.observe(match.person_id, match.last_access_age_s)
+            if kind is not None:
+                self._record_access(match, kind)
+                greetings.append(Greeting(kind, match.full_name))
+            self._learn_if_confident(detection, match)
+        return greetings
 
-            best = candidates[0]
-            detection.match = best
-            if self._claim_greeting(best.person_id):
-                self._record_access(best)
-                greeted.append(best.full_name)
-            self._learn_if_confident(detection, best)
-        return greeted
+    def _identify(self, detection: FaceDetection) -> Match | None:
+        """Restituisce la persona registrata piu simile al volto, se supera la soglia di riconoscimento."""
+        if detection.embedding is None:
+            return None
+        candidates = self._db.find_nearest(detection.embedding, self._settings.top_k_neighbors)
+        if not candidates or candidates[0].similarity < self._settings.recognition_threshold:
+            return None
+        return candidates[0]
 
-    def register_greeting(self, person_id: int) -> None:
-        """Segna una persona come gia salutata (ad esempio dopo la registrazione), evitando doppi saluti."""
-        with self._greeting_lock:
-            self._last_greeted[person_id] = self._clock()
-
-    def _claim_greeting(self, person_id: int) -> bool:
-        """Debouncing: concede il saluto solo se e trascorso il cooldown dall'ultimo saluto."""
-        now = self._clock()
-        with self._greeting_lock:
-            last = self._last_greeted.get(person_id)
-            if last is not None and now - last < self._settings.greeting_cooldown_seconds:
-                return False
-            self._last_greeted[person_id] = now
-            return True
-
-    def _record_access(self, match: Match) -> None:
+    def _record_access(self, match: Match, kind: GreetingKind) -> None:
         """Registra l'accesso nel database. Un errore DB non blocca il saluto a schermo."""
         try:
             self._db.record_greeting(match.person_id, match.similarity)
         except DatabaseError as exc:
             logger.error("Accesso di %s non registrato nel database: %s", match.full_name, exc)
-        logger.info("Saluto: %s (similarita %.2f)", match.full_name, match.similarity)
+        logger.info("Saluto %s: %s (similarita %.2f)", kind.name, match.full_name, match.similarity)
 
     def _learn_if_confident(self, detection: FaceDetection, match: Match) -> None:
         """Apprendimento continuo: accumula riconoscimenti sicuri e salva la media in batch."""

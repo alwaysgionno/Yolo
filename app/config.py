@@ -82,7 +82,7 @@ class Settings:
     continuous_learning_threshold: float
 
     # Comportamento applicativo
-    greeting_cooldown_seconds: float
+    welcome_back_absence_seconds: float
     unknown_snooze_seconds: float
     unknown_confirm_seconds: float
     enrollment_samples: int
@@ -128,7 +128,7 @@ class Settings:
             insightface_det_size=_get_int("INSIGHTFACE_DET_SIZE", 320),
             recognition_threshold=_get_float("RECOGNITION_THRESHOLD", 0.40),
             continuous_learning_threshold=_get_float("CONTINUOUS_LEARNING_THRESHOLD", 0.55),
-            greeting_cooldown_seconds=_get_float("GREETING_COOLDOWN_SECONDS", 300.0),
+            welcome_back_absence_seconds=_get_float("WELCOME_BACK_ABSENCE_SECONDS", 600.0),
             unknown_snooze_seconds=_get_float("UNKNOWN_SNOOZE_SECONDS", 60.0),
             unknown_confirm_seconds=_get_float("UNKNOWN_CONFIRM_SECONDS", 1.5),
             enrollment_samples=_get_int("ENROLLMENT_SAMPLES", 8),
@@ -179,7 +179,7 @@ class Settings:
 
         for label, value in (
             ("CAMERA_INDEX", self.camera_index),
-            ("GREETING_COOLDOWN_SECONDS", self.greeting_cooldown_seconds),
+            ("WELCOME_BACK_ABSENCE_SECONDS", self.welcome_back_absence_seconds),
             ("UNKNOWN_SNOOZE_SECONDS", self.unknown_snooze_seconds),
             ("UNKNOWN_CONFIRM_SECONDS", self.unknown_confirm_seconds),
             ("MIN_SHARPNESS", self.min_sharpness),

@@ -8,9 +8,9 @@ from __future__ import annotations
 import unittest
 
 from app.enrollment import ENTER_KEYS, EnrollmentSession, EnrollmentState
-from app.main import FaceAccessApp, _greeting_text
-from app.models import FrameResult
-from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings
+from app.main import FaceAccessApp, _greeting_texts
+from app.models import FrameResult, Greeting, GreetingKind, Match
+from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings, other_person_vector
 
 
 class FakeUI:
@@ -19,14 +19,6 @@ class FakeUI:
 
     def show_toast(self, text: str, seconds: float | None = None) -> None:
         self.toasts.append(text)
-
-
-class FakeRecognizer:
-    def __init__(self) -> None:
-        self.greeted_ids: list[int] = []
-
-    def register_greeting(self, person_id: int) -> None:
-        self.greeted_ids.append(person_id)
 
 
 class FakeCamera:
@@ -46,7 +38,6 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.app._settings = settings
         self.app._enrollment = EnrollmentSession(settings, self.db, clock=self.clock)
         self.app._ui = FakeUI()
-        self.app._recognizer = FakeRecognizer()
         self.app._camera = FakeCamera()
         self.app._last_enrollment_frame_id = -1
         self.frame_id = 0
@@ -83,8 +74,24 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.enroll("Mario")
         self.assertIs(self.state, EnrollmentState.IDLE)
         self.assertEqual([name for name, _, _ in self.db.created], ["Mario"])
-        self.assertEqual(self.app._recognizer.greeted_ids, [1])
         self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Profilo creato. Benvenuto, Mario!"])
+
+    def test_registration_starts_with_a_known_person_in_view(self) -> None:
+        anna = make_detection(other_person_vector(), match=Match(7, "Anna", 0.8))
+        for _ in range(4):
+            result = self.unknown_result()
+            result.detections.insert(0, anna)
+            self.feed(result)
+        self.assertIs(self.state, EnrollmentState.NAME_INPUT)
+
+    def test_prompt_is_withdrawn_when_the_face_turns_out_to_be_registered(self) -> None:
+        self.confirm_unknown_face()
+        for _ in range(2):  # la stessa persona, ora riconosciuta: era un falso "sconosciuto"
+            result = self.unknown_result()
+            result.detections[0].match = Match(7, "Anna", 0.8)
+            self.feed(result)
+        self.assertIs(self.state, EnrollmentState.IDLE)
+        self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Volto gia registrato come Anna"])
 
     def test_results_older_than_the_save_do_not_restart_the_registration(self) -> None:
         self.enroll("Mario")
@@ -119,10 +126,24 @@ class EnrollmentFlowTest(unittest.TestCase):
 
 
 class GreetingTextTest(unittest.TestCase):
+    @staticmethod
+    def back(*names: str) -> list[Greeting]:
+        return [Greeting(GreetingKind.WELCOME_BACK, name) for name in names]
+
     def test_one_or_more_names(self) -> None:
-        self.assertEqual(_greeting_text(["Mario"]), "Bentornato, Mario!")
-        self.assertEqual(_greeting_text(["Mario", "Anna"]), "Bentornati, Mario e Anna!")
-        self.assertEqual(_greeting_text(["Mario", "Anna", "Mario", "Luca"]), "Bentornati, Mario, Anna e Luca!")
+        self.assertEqual(_greeting_texts([]), [])
+        self.assertEqual(_greeting_texts(self.back("Mario")), ["Bentornato, Mario!"])
+        self.assertEqual(_greeting_texts(self.back("Mario", "Anna")), ["Bentornati, Mario e Anna!"])
+        self.assertEqual(
+            _greeting_texts(self.back("Mario", "Anna", "Mario", "Luca")),
+            ["Bentornati, Mario, Anna e Luca!"],
+        )
+
+    def test_welcome_and_welcome_back_are_separate_messages(self) -> None:
+        greetings = [Greeting(GreetingKind.WELCOME, "Carla"), *self.back("Mario", "Anna")]
+        self.assertEqual(_greeting_texts(greetings), ["Benvenuto, Carla!", "Bentornati, Mario e Anna!"])
+        newcomers = [Greeting(GreetingKind.WELCOME, "Carla"), Greeting(GreetingKind.WELCOME, "Dario")]
+        self.assertEqual(_greeting_texts(newcomers), ["Benvenuti, Carla e Dario!"])
 
 
 if __name__ == "__main__":
