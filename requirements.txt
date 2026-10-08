@@ -1,0 +1,44 @@
+# =============================================================================
+#  REQUISITI PYTHON - Riconoscimento facciale in tempo reale (Face Access)
+# =============================================================================
+#
+#  PREREQUISITI (da installare prima di tutto)
+#   - Python 3.11 (oppure 3.10). Non usare Python 3.13 o superiori.
+#   - Docker Desktop (per PostgreSQL con pgvector).
+#   - Solo Windows: "Build Tools per Visual Studio" con il carico di lavoro
+#     "Sviluppo di applicazioni desktop con C++" (serve a compilare insightface).
+#
+#  COMANDI DI INSTALLAZIONE (eseguili nell'ambiente virtuale .venv attivo)
+#   1. python -m pip install --upgrade pip
+#   2. pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cpu
+#   3. pip install -r requirements.txt
+#   4. pip uninstall -y opencv-python opencv-python-headless
+#   5. pip install opencv-python==4.10.0.84
+#
+#  I passi 4 e 5 sono necessari: insightface installa anche opencv-python-headless,
+#  che va in conflitto con opencv-python (entrambi forniscono il modulo "cv2").
+#
+#  ELENCO LIBRERIE E SCOPO
+#   opencv-python 4.10.0.84  -> cattura dalla webcam, finestra video, riquadri e testi a schermo
+#   numpy 1.26.4             -> calcolo numerico: immagini come matrici, vettori biometrici, similarita
+#   ultralytics 8.3.0        -> YOLOv8: rilevamento rapido dei volti nel fotogramma
+#   insightface 0.7.3        -> ArcFace: genera l'embedding biometrico del volto (512 valori)
+#   onnxruntime 1.19.2       -> motore di esecuzione dei modelli ONNX di InsightFace (su CPU)
+#   psycopg2-binary 2.9.9    -> driver che permette a Python di dialogare con PostgreSQL
+#   python-dotenv 1.0.1      -> legge le credenziali e i parametri dal file .env
+#
+#  Altre librerie (torch, torchvision, matplotlib, pandas, scipy, scikit-learn,
+#  albumentations, ecc.) vengono installate automaticamente come dipendenze.
+#  Il file .env va creato copiando .env.example.
+#
+#  Se un pacchetto non risulta disponibile, verifica l'ultima versione con:
+#      pip index versions <nome_pacchetto>
+# =============================================================================
+
+opencv-python==4.10.0.84
+numpy==1.26.4
+ultralytics==8.3.0
+insightface==0.7.3
+onnxruntime==1.19.2
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1

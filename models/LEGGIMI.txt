@@ -1,0 +1,7 @@
+Copia in questa cartella i pesi YOLO per il rilevamento dei volti:
+
+    models/yolov8n-face.pt
+
+Se il file manca, al primo avvio l'applicazione scarica qui il modello generico
+yolov8n.pt (rileva le persone) e cerca il volto all'interno del ritaglio.
+Vedi la sezione 8 del README.

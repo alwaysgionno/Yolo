@@ -1,0 +1,37 @@
+# =============================================================================
+#  PostgreSQL 16 con estensione pgvector
+#  Avvio:    docker compose up -d
+#  Stato:    docker compose ps
+#  Stop:     docker compose down
+#  Reset:    docker compose down -v   (CANCELLA tutti i dati)
+#
+#  Docker legge automaticamente le variabili dal file .env nella stessa cartella.
+# =============================================================================
+
+# Nome fisso del progetto: non dipende dal nome della cartella (che contiene spazi)
+name: face_access
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: face_access_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-face_access}
+      POSTGRES_USER: ${DB_USER:-face_app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Imposta DB_PASSWORD nel file .env}
+    ports:
+      # Solo 127.0.0.1: il database con i dati biometrici non e raggiungibile dalla rete locale
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Schema eseguito una sola volta, alla prima creazione del volume
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-face_app} -d ${DB_NAME:-face_access}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

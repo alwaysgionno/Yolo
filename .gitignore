@@ -1,0 +1,11 @@
+# Credenziali: il file .env non va mai condiviso o committato
+.env
+
+# Ambiente virtuale e file generati da Python
+.venv/
+__pycache__/
+*.pyc
+
+# Pesi dei modelli (file grandi, scaricati a parte)
+models/*.pt
+models/*.onnx
