@@ -5,13 +5,16 @@ Flusso (macchina a stati gestita dal thread della UI):
     IDLE -> NAME_INPUT (l'utente digita il nome)
          -> CAPTURING (acquisizione di 5-10 campioni validi)
          -> COMPLETED (salvataggio nel database)   oppure   CANCELLED (annullato o scaduto)
+
+La sessione segue un solo volto, quello scelto dal NewFaceSelector: gli altri volti
+presenti nel fotogramma vengono ignorati.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from enum import Enum, auto
 
 import numpy as np
@@ -19,6 +22,7 @@ import numpy as np
 from .config import Settings
 from .database_manager import DatabaseError, DatabaseManager
 from .models import FaceDetection
+from .new_face_selector import NewFaceSelector, find_same_face
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +34,10 @@ PRINTABLE_KEYS = range(32, 127)
 MIN_NAME_LENGTH = 2
 MAX_NAME_LENGTH = 40
 MIN_SAMPLE_INTERVAL_S = 0.4
-UNKNOWN_CONFIRM_RESULTS = 3    # risultati consecutivi con il volto sconosciuto prima di chiedere il nome
-IDENTITY_CONSISTENCY = 0.50    # similarita minima con il primo campione (stessa persona)
-DUPLICATE_SIMILARITY = 0.985   # campioni quasi identici: scartati per garantire varieta
+DUPLICATE_SIMILARITY = 0.985     # campioni quasi identici: scartati per garantire varieta
+KNOWN_FACE_CONFIRMATIONS = 2     # riconoscimenti di fila che rivelano un volto gia registrato
 NAME_INPUT_TIMEOUT_S = 60.0
+CANDIDATE_LOST_TIMEOUT_S = 10.0  # senza volto e senza nome digitato la richiesta viene ritirata
 CAPTURE_TIMEOUT_S = 30.0
 
 
@@ -59,6 +63,7 @@ class EnrollmentSession:
         self._settings = settings
         self._db = database
         self._clock = clock
+        self._selector = NewFaceSelector(settings, clock)
 
         self.state = EnrollmentState.IDLE
         self.name = ""
@@ -68,12 +73,12 @@ class EnrollmentSession:
 
         self._samples: list[np.ndarray] = []
         self._qualities: list[float] = []
-        self._reference: np.ndarray | None = None
+        self._reference: np.ndarray | None = None  # embedding del volto in registrazione
+        self._known_streak = 0
         self._state_entered_at = 0.0
+        self._candidate_seen_at = 0.0
         self._last_sample_at = float("-inf")
         self._snoozed_until = 0.0
-        self._unknown_since: float | None = None
-        self._unknown_streak = 0
 
     @property
     def is_active(self) -> bool:
@@ -88,39 +93,36 @@ class EnrollmentSession:
     def consider_start(self, detections: Sequence[FaceDetection]) -> bool:
         """Valuta un nuovo risultato di inferenza e, se serve, avvia la registrazione.
 
-        La registrazione parte solo quando un unico volto, sconosciuto e abbastanza grande,
-        resta nel fotogramma per piu risultati consecutivi: un singolo fotogramma mosso o
-        di profilo non basta a far comparire la richiesta del nome. Va chiamata una volta
-        per ogni risultato di inferenza.
+        La registrazione parte quando il NewFaceSelector conferma un volto sconosciuto,
+        fuori dal periodo di snooze: un singolo fotogramma mosso o di profilo non basta a
+        far comparire la richiesta del nome. Va chiamata una volta per ogni risultato di inferenza.
 
         Returns:
             True se la registrazione e stata avviata.
         """
         if self.state is not EnrollmentState.IDLE:
             return False
-        now = self._clock()
-        if now < self._snoozed_until or not self._is_candidate(detections):
-            self._reset_unknown_streak()
+        if self._clock() < self._snoozed_until:
+            self._selector.reset()
             return False
-
-        if self._unknown_since is None:
-            self._unknown_since = now
-        self._unknown_streak += 1
-        if self._unknown_streak < UNKNOWN_CONFIRM_RESULTS:
+        candidate = self._selector.update(detections)
+        if candidate is None:
             return False
-        if now - self._unknown_since < self._settings.unknown_confirm_seconds:
-            return False
-        self.start()
+        self.start(candidate)
         return True
 
-    def start(self) -> None:
-        """Avvia la registrazione chiedendo il nome."""
+    def start(self, candidate: FaceDetection) -> None:
+        """Avvia la registrazione del volto indicato chiedendo il nome."""
+        if candidate.embedding is None:
+            raise ValueError("Il volto da registrare deve avere un embedding")
         self._clear_buffers()
-        self._reset_unknown_streak()
+        self._selector.reset()
         self.name = ""
         self.error = ""
         self.feedback = ""
         self.person_id = None
+        self._reference = candidate.embedding
+        self._candidate_seen_at = self._clock()
         self._set_state(EnrollmentState.NAME_INPUT)
 
     def handle_key(self, key: int) -> None:
@@ -139,32 +141,70 @@ class EnrollmentSession:
             self.name += chr(key)
             self.error = ""
 
+    def candidate_in(self, detections: Iterable[FaceDetection]) -> FaceDetection | None:
+        """Restituisce, tra i volti indicati, quello in registrazione (None se assente o a sessione inattiva)."""
+        if not self.is_active or self._reference is None:
+            return None
+        return find_same_face(detections, self._reference)
+
     def offer_frame(self, detections: Sequence[FaceDetection]) -> None:
-        """Valuta i volti di un nuovo risultato di inferenza durante la cattura."""
-        if self.state is not EnrollmentState.CAPTURING:
-            return
-        if not detections:
-            self.feedback = "Nessun volto rilevato: guarda la webcam"
-        elif len(detections) > 1:
-            self.feedback = "Piu volti rilevati: resta solo tu davanti alla webcam"
-        else:
-            self.offer_detection(detections[0])
+        """Valuta i volti di un nuovo risultato di inferenza mentre la registrazione e attiva.
 
-    def offer_detection(self, detection: FaceDetection) -> None:
-        """Valuta il volto del fotogramma corrente e, se valido, lo aggiunge ai campioni.
-
-        Ogni chiamata e idempotente rispetto al tempo: campioni troppo ravvicinati vengono ignorati.
+        Viene seguito solo il volto selezionato all'avvio. Durante la cattura, se e valido,
+        diventa un nuovo campione. Se risulta gia registrato in piu risultati consecutivi,
+        la registrazione viene annullata. Va chiamata una volta per ogni risultato di inferenza.
         """
-        if self.state is not EnrollmentState.CAPTURING or detection.embedding is None:
+        candidate = self.candidate_in(detections)
+        if candidate is None:
+            if self.state is EnrollmentState.CAPTURING:
+                self.feedback = (
+                    "Volto diverso da quello in registrazione: torna davanti alla webcam"
+                    if detections
+                    else "Nessun volto rilevato: guarda la webcam"
+                )
             return
-        if self._clock() - self._last_sample_at < MIN_SAMPLE_INTERVAL_S:
+
+        self._candidate_seen_at = self._clock()
+        if candidate.match is not None:
+            # Il volto appartiene a un profilo esistente: salvarlo creerebbe un duplicato
+            self.feedback = f"Volto gia registrato come {candidate.match.full_name}"
+            self._known_streak += 1
+            if self._known_streak >= KNOWN_FACE_CONFIRMATIONS:
+                self._cancel(self.feedback, snooze=True)
+            return
+        self._known_streak = 0
+
+        if self.state is EnrollmentState.CAPTURING:
+            self._add_sample(candidate)
+
+    def tick(self) -> None:
+        """Annulla la registrazione se rimane ferma troppo a lungo in uno stato."""
+        now = self._clock()
+        elapsed = now - self._state_entered_at
+        if self.state is EnrollmentState.NAME_INPUT:
+            if elapsed > NAME_INPUT_TIMEOUT_S:
+                self._cancel("Tempo scaduto: nessun nome inserito", snooze=True)
+            elif not self.name and now - self._candidate_seen_at > CANDIDATE_LOST_TIMEOUT_S:
+                self._cancel("Registrazione annullata: volto non piu presente", snooze=False)
+        elif self.state is EnrollmentState.CAPTURING and elapsed > CAPTURE_TIMEOUT_S:
+            self._cancel("Cattura non completata: riprova", snooze=True)
+
+    def reset(self) -> None:
+        """Riporta la sessione allo stato IDLE dopo aver gestito un esito finale."""
+        self._clear_buffers()
+        self._selector.reset()
+        self._set_state(EnrollmentState.IDLE)
+
+    def _add_sample(self, detection: FaceDetection) -> None:
+        """Valuta il volto in registrazione e, se valido, lo aggiunge ai campioni.
+
+        Campioni troppo ravvicinati nel tempo vengono ignorati.
+        """
+        embedding = detection.embedding
+        if embedding is None or self._clock() - self._last_sample_at < MIN_SAMPLE_INTERVAL_S:
             return
 
         settings = self._settings
-        if detection.match is not None:
-            # Il volto appartiene a un profilo esistente: salvarlo creerebbe un duplicato
-            self.feedback = f"Volto gia registrato come {detection.match.full_name}"
-            return
         if detection.face_width < settings.min_face_width_px:
             self.feedback = "Avvicinati alla webcam"
             return
@@ -174,18 +214,12 @@ class EnrollmentSession:
                 "stai fermo e migliora la luce"
             )
             return
-
-        embedding = detection.embedding
-        if self._reference is None:
-            self._reference = embedding
-        elif float(np.dot(embedding, self._reference)) < IDENTITY_CONSISTENCY:
-            self.feedback = "Volto diverso dal primo campione: resta solo tu davanti alla webcam"
-            return
-
         if self._samples and max(float(np.dot(embedding, prev)) for prev in self._samples) > DUPLICATE_SIMILARITY:
             self.feedback = "Muovi un po la testa o cambia l'inclinazione"
             return
 
+        if not self._samples:
+            self._reference = embedding  # il primo campione valido diventa il riferimento dell'identita
         self._samples.append(embedding)
         self._qualities.append(detection.sharpness)
         self._last_sample_at = self._clock()
@@ -194,31 +228,6 @@ class EnrollmentSession:
 
         if len(self._samples) >= settings.enrollment_samples:
             self._save()
-
-    def tick(self) -> None:
-        """Annulla la registrazione se rimane ferma troppo a lungo in uno stato."""
-        elapsed = self._clock() - self._state_entered_at
-        if self.state is EnrollmentState.NAME_INPUT and elapsed > NAME_INPUT_TIMEOUT_S:
-            self._cancel("Tempo scaduto: nessun nome inserito", snooze=True)
-        elif self.state is EnrollmentState.CAPTURING and elapsed > CAPTURE_TIMEOUT_S:
-            self._cancel("Cattura non completata: riprova", snooze=True)
-
-    def reset(self) -> None:
-        """Riporta la sessione allo stato IDLE dopo aver gestito un esito finale."""
-        self._clear_buffers()
-        self._reset_unknown_streak()
-        self._set_state(EnrollmentState.IDLE)
-
-    def _is_candidate(self, detections: Sequence[FaceDetection]) -> bool:
-        """True se nel fotogramma c'e un solo volto, sconosciuto e abbastanza grande da registrare."""
-        if len(detections) != 1:
-            return False
-        candidate = detections[0]
-        return (
-            candidate.match is None
-            and candidate.embedding is not None
-            and candidate.face_width >= self._settings.min_face_width_px
-        )
 
     def _confirm_name(self) -> None:
         """Valida il nome digitato e passa alla fase di cattura."""
@@ -248,7 +257,7 @@ class EnrollmentSession:
         self._set_state(EnrollmentState.COMPLETED)
 
     def _cancel(self, message: str, snooze: bool) -> None:
-        """Annulla la registrazione; con `snooze` il volto non viene riproposto per un po'."""
+        """Annulla la registrazione; con `snooze` nessun volto viene riproposto per un po'."""
         self.error = message
         if snooze:
             self._snoozed_until = self._clock() + self._settings.unknown_snooze_seconds
@@ -262,8 +271,5 @@ class EnrollmentSession:
         self._samples.clear()
         self._qualities.clear()
         self._reference = None
+        self._known_streak = 0
         self._last_sample_at = float("-inf")
-
-    def _reset_unknown_streak(self) -> None:
-        self._unknown_since = None
-        self._unknown_streak = 0

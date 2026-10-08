@@ -18,7 +18,7 @@ from .database_manager import DatabaseError, DatabaseManager
 from .enrollment import EnrollmentSession, EnrollmentState
 from .face_processor import FaceProcessor
 from .inference_worker import InferenceWorker
-from .models import FrameResult
+from .models import FrameResult, Greeting, GreetingKind
 from .recognition_service import RecognitionService
 from .ui_controller import NO_KEY, UIController
 
@@ -30,6 +30,10 @@ GREETING_TOAST_SECONDS = 4.0
 NOTICE_TOAST_SECONDS = 2.5
 FRAME_WAIT_TIMEOUT_S = 0.05   # attesa massima di un nuovo fotogramma: la UI resta reattiva ai tasti
 RESULT_MAX_AGE_S = 3.0        # un risultato di inferenza piu vecchio non descrive piu la scena
+GREETING_WORDS = {            # tipo di saluto -> (per una persona, per piu persone)
+    GreetingKind.WELCOME: ("Benvenuto", "Benvenuti"),
+    GreetingKind.WELCOME_BACK: ("Bentornato", "Bentornati"),
+}
 
 
 class FaceAccessApp:
@@ -78,9 +82,8 @@ class FaceAccessApp:
             camera_connected = self._camera.is_connected
 
             result = self._current_result(camera_connected)
-            greeted = self._worker.drain_greetings()
-            if greeted:
-                self._ui.show_toast(_greeting_text(greeted), GREETING_TOAST_SECONDS)
+            for text in _greeting_texts(self._worker.drain_greetings()):
+                self._ui.show_toast(text, GREETING_TOAST_SECONDS)
             self._update_enrollment(result)
 
             canvas = self._ui.render(
@@ -132,19 +135,19 @@ class FaceAccessApp:
         # 1. Ogni risultato di inferenza viene valutato una sola volta, e solo se il database ha risposto
         if result is not None and result.db_ok and result.frame_id > self._last_enrollment_frame_id:
             self._last_enrollment_frame_id = result.frame_id
-            if enrollment.state is EnrollmentState.IDLE:
-                # Un volto sconosciuto e solo nel fotogramma da qualche istante: si propone la registrazione
-                if enrollment.consider_start(result.detections):
-                    self._ui.show_toast("Nuovo volto rilevato", NOTICE_TOAST_SECONDS)
-            elif enrollment.state is EnrollmentState.CAPTURING:
+            if enrollment.is_active:
+                # Si segue il volto in registrazione: durante la cattura fornisce i campioni
                 enrollment.offer_frame(result.detections)
+            elif enrollment.consider_start(result.detections):
+                # Un volto sconosciuto resta inquadrato da qualche istante: si propone la registrazione
+                self._ui.show_toast("Nuovo volto rilevato", NOTICE_TOAST_SECONDS)
 
         # 2. Scadenze e esiti finali
         enrollment.tick()
         if enrollment.state is EnrollmentState.COMPLETED:
+            # Il profilo nasce con l'ultimo accesso gia valorizzato: al primo riconoscimento
+            # il servizio non aggiunge un secondo saluto
             self._ui.show_toast(f"Profilo creato. Benvenuto, {enrollment.name}!", GREETING_TOAST_SECONDS)
-            if enrollment.person_id is not None:
-                self._recognizer.register_greeting(enrollment.person_id)
             # I risultati calcolati sui fotogrammi precedenti al salvataggio vedono ancora la persona
             # come sconosciuta: vengono ignorati, altrimenti la registrazione ripartirebbe subito
             newest_frame_id, _ = self._camera.latest()
@@ -164,12 +167,16 @@ class FaceAccessApp:
         logger.info("Applicazione chiusa")
 
 
-def _greeting_text(names: list[str]) -> str:
-    """Compone il saluto per una o piu persone riconosciute nello stesso momento."""
-    unique = list(dict.fromkeys(names))
-    if len(unique) == 1:
-        return f"Bentornato, {unique[0]}!"
-    return f"Bentornati, {', '.join(unique[:-1])} e {unique[-1]}!"
+def _greeting_texts(greetings: list[Greeting]) -> list[str]:
+    """Compone un messaggio per tipo di saluto, riunendo le persone riconosciute nello stesso momento."""
+    texts: list[str] = []
+    for kind, (singular, plural) in GREETING_WORDS.items():
+        names = list(dict.fromkeys(greeting.full_name for greeting in greetings if greeting.kind is kind))
+        if len(names) == 1:
+            texts.append(f"{singular}, {names[0]}!")
+        elif names:
+            texts.append(f"{plural}, {', '.join(names[:-1])} e {names[-1]}!")
+    return texts
 
 
 def main() -> int:

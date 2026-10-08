@@ -16,7 +16,7 @@ import numpy as np
 from .camera_stream import CameraStream
 from .database_manager import DatabaseError
 from .face_processor import FaceProcessor
-from .models import FrameResult
+from .models import FrameResult, Greeting
 from .recognition_service import RecognitionService
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ class InferenceWorker(threading.Thread):
         self._stop_event = threading.Event()
         self._result_lock = threading.Lock()
         self._latest: FrameResult | None = None
-        self._greetings: queue.Queue[str] = queue.Queue()
+        self._greetings: queue.Queue[Greeting] = queue.Queue()
         self._fps = 0.0
         self._db_ok = True  # esito dell'ultimo accesso al database, usato solo dal thread di inferenza
 
@@ -62,14 +62,14 @@ class InferenceWorker(threading.Thread):
         with self._result_lock:
             return self._latest
 
-    def drain_greetings(self) -> list[str]:
-        """Restituisce tutti i nomi da salutare accumulati dall'ultima chiamata."""
-        names: list[str] = []
+    def drain_greetings(self) -> list[Greeting]:
+        """Restituisce tutti i saluti accumulati dall'ultima chiamata."""
+        greetings: list[Greeting] = []
         while True:
             try:
-                names.append(self._greetings.get_nowait())
+                greetings.append(self._greetings.get_nowait())
             except queue.Empty:
-                return names
+                return greetings
 
     def run(self) -> None:
         """Ciclo principale: attende un frame nuovo, lo elabora e pubblica il risultato."""
@@ -120,8 +120,8 @@ class InferenceWorker(threading.Thread):
             logger.info("Database di nuovo disponibile: riconoscimento ripreso")
         self._db_ok = db_ok
 
-        for name in greetings:
-            self._greetings.put(name)
+        for greeting in greetings:
+            self._greetings.put(greeting)
         return FrameResult(
             frame_id=frame_id,
             detections=detections,

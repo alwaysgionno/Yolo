@@ -32,7 +32,7 @@ def make_settings(**overrides: object) -> Settings:
         "insightface_det_size": 320,
         "recognition_threshold": 0.40,
         "continuous_learning_threshold": 0.55,
-        "greeting_cooldown_seconds": 300.0,
+        "welcome_back_absence_seconds": 600.0,
         "unknown_snooze_seconds": 60.0,
         "unknown_confirm_seconds": 1.5,
         "enrollment_samples": 5,

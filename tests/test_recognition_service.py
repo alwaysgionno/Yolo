@@ -1,15 +1,19 @@
-"""Test di RecognitionService: soglia, saluti con debouncing e apprendimento continuo."""
+"""Test di RecognitionService: soglia, saluti e apprendimento continuo."""
 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from app.database_manager import DatabaseError
-from app.models import Match
+from app.models import Greeting, GreetingKind, Match
 from app.recognition_service import RecognitionService
 from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings
+
+WELCOME_MARIO = Greeting(GreetingKind.WELCOME, "Mario")
+WELCOME_BACK_MARIO = Greeting(GreetingKind.WELCOME_BACK, "Mario")
 
 
 class RecognitionServiceTestCase(unittest.TestCase):
@@ -18,9 +22,19 @@ class RecognitionServiceTestCase(unittest.TestCase):
         self.db = FakeDatabase()
         self.service = RecognitionService(make_settings(), self.db, clock=self.clock)
 
-    def see(self, similarity: float, *, axis: int = 1, sharpness: float = 120.0) -> list[str]:
-        """Simula un fotogramma in cui il vicino piu simile e Mario con la similarita indicata."""
-        self.db.nearest = [Match(1, "Mario", similarity), Match(2, "Anna", 0.10)]
+    def see(
+        self,
+        similarity: float,
+        *,
+        axis: int = 1,
+        sharpness: float = 120.0,
+        last_access_age_s: float | None = None,
+    ) -> list[Greeting]:
+        """Simula un fotogramma in cui il vicino piu simile e Mario con la similarita indicata.
+
+        `last_access_age_s` e l'eta dell'ultimo accesso salvato nel database (None: mai salutato).
+        """
+        self.db.nearest = [Match(1, "Mario", similarity, last_access_age_s), Match(2, "Anna", 0.10)]
         return self.service.process([make_detection(face_vector(axis), sharpness=sharpness)])
 
 
@@ -40,7 +54,7 @@ class ThresholdTest(RecognitionServiceTestCase):
     def test_face_at_threshold_is_recognized(self) -> None:
         self.db.nearest = [Match(1, "Mario", 0.40)]
         detection = make_detection()
-        self.assertEqual(self.service.process([detection]), ["Mario"])
+        self.assertEqual(self.service.process([detection]), [WELCOME_MARIO])
         self.assertEqual(detection.match, Match(1, "Mario", 0.40))
 
     def test_database_failure_is_reported_to_the_caller(self) -> None:
@@ -50,24 +64,59 @@ class ThresholdTest(RecognitionServiceTestCase):
 
 
 class GreetingTest(RecognitionServiceTestCase):
-    def test_one_greeting_per_cooldown(self) -> None:
-        self.assertEqual(self.see(0.45), ["Mario"])
-        self.clock.advance(299.0)
+    def test_welcome_only_at_the_first_recognition_ever(self) -> None:
+        self.assertEqual(self.see(0.45), [WELCOME_MARIO])
+        self.clock.advance(1.0)
         self.assertEqual(self.see(0.45), [])
-        self.clock.advance(2.0)
-        self.assertEqual(self.see(0.47), ["Mario"])
-        self.assertEqual(self.db.greetings, [(1, 0.45), (1, 0.47)])
+        self.assertEqual(self.db.greetings, [(1, 0.45)])
 
-    def test_greeting_registered_by_enrollment_suppresses_the_first_one(self) -> None:
-        self.service.register_greeting(1)
-        self.assertEqual(self.see(0.60), [])
-        self.clock.advance(301.0)
-        self.assertEqual(self.see(0.60), ["Mario"])
+    def test_no_greeting_while_the_person_stays_in_view(self) -> None:
+        self.see(0.45)
+        for _ in range(400):  # 20 minuti davanti alla webcam, un riconoscimento ogni 3 secondi
+            self.clock.advance(3.0)
+            self.assertEqual(self.see(0.45), [])
+
+    def test_welcome_back_only_after_ten_minutes_out_of_view(self) -> None:
+        self.assertEqual(self.see(0.45, last_access_age_s=30.0), [])
+        self.clock.advance(599.0)
+        self.assertEqual(self.see(0.45), [])  # rivisto: l'assenza si misura da qui, non dall'ultimo saluto
+        self.clock.advance(599.0)
+        self.assertEqual(self.see(0.45), [])
+        self.clock.advance(600.0)
+        self.assertEqual(self.see(0.47), [WELCOME_BACK_MARIO])
+        self.assertEqual(self.db.greetings, [(1, 0.47)])
+
+    def test_person_just_enrolled_is_not_greeted_again(self) -> None:
+        # create_person valorizza last_access_at: al primo riconoscimento l'ultimo accesso e di pochi istanti fa
+        self.assertEqual(self.see(0.60, last_access_age_s=0.5), [])
+        self.assertEqual(self.db.greetings, [])
+
+    def test_first_sighting_after_restart_relies_on_the_saved_access(self) -> None:
+        self.assertEqual(self.see(0.60, last_access_age_s=600.0), [WELCOME_BACK_MARIO])
+
+    def test_same_person_detected_twice_is_greeted_once(self) -> None:
+        self.db.nearest = [Match(1, "Mario", 0.70)]
+        self.assertEqual(self.service.process([make_detection(), make_detection()]), [WELCOME_MARIO])
 
     def test_greeting_is_shown_even_if_the_log_cannot_be_written(self) -> None:
         self.db.failing.add("record_greeting")
-        self.assertEqual(self.see(0.45), ["Mario"])
+        self.assertEqual(self.see(0.45), [WELCOME_MARIO])
         self.assertEqual(self.db.greetings, [])
+
+    def test_database_failure_in_the_middle_of_a_frame_does_not_lose_greetings(self) -> None:
+        mario, anna = [Match(1, "Mario", 0.70)], [Match(2, "Anna", 0.70, last_access_age_s=900.0)]
+        faces = [make_detection(), make_detection()]
+
+        # Mario viene identificato, poi la ricerca di Anna fallisce: nessun saluto deve andare perso
+        with mock.patch.object(self.db, "find_nearest", side_effect=[mario, DatabaseError("simulato")]):
+            with self.assertRaises(DatabaseError):
+                self.service.process(faces)
+        self.assertEqual(self.db.greetings, [])
+
+        self.clock.advance(0.3)
+        with mock.patch.object(self.db, "find_nearest", side_effect=[mario, anna]):
+            greetings = self.service.process(faces)
+        self.assertEqual(greetings, [WELCOME_MARIO, Greeting(GreetingKind.WELCOME_BACK, "Anna")])
 
 
 class ContinuousLearningTest(RecognitionServiceTestCase):

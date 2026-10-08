@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from unittest import mock
 
 import numpy as np
@@ -34,7 +35,8 @@ class FakeCursor:
         return self._connection.row
 
     def fetchall(self) -> list[tuple]:
-        return [(1, "Mario", 0.75)]
+        # Come PostgreSQL: EXTRACT restituisce un NUMERIC, oppure NULL per chi non e mai stato salutato
+        return [(1, "Mario", 0.75, Decimal("42.5")), (2, "Anna", 0.20, None)]
 
 
 class FakeConnection:
@@ -131,6 +133,20 @@ class ConnectionHandlingTest(unittest.TestCase):
         statements = [query.split()[0] for query in self.connection.queries]
         self.assertEqual(statements, ["INSERT", "DELETE", "UPDATE"])
         self.assertIn("SELECT COUNT(*) FROM face_embeddings", self.connection.queries[-1])
+
+    def test_nearest_matches_report_the_age_of_the_last_access(self) -> None:
+        self.connection.queries.clear()
+        mario, anna = self.manager.find_nearest(face_vector(1), limit=5)
+        self.assertIn("NOW() - p.last_access_at", self.connection.queries[-1])
+        self.assertEqual(mario.last_access_age_s, 42.5)
+        self.assertIsInstance(mario.last_access_age_s, float)
+        self.assertIsNone(anna.last_access_age_s)
+
+    def test_create_person_records_the_first_access(self) -> None:
+        self.connection.queries.clear()
+        self.manager.create_person("Mario", [face_vector(1), face_vector(2)], [90.0, 95.0])
+        self.assertIn("last_access_at", self.connection.queries[0])
+        self.assertIn("NOW()", self.connection.queries[0])
 
     def test_create_person_needs_one_quality_per_embedding(self) -> None:
         with self.assertRaises(ValueError):

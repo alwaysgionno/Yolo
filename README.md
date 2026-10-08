@@ -36,8 +36,10 @@ allenamento riconoscimento facciale AI/
 │   ├── camera_stream.py        # Thread di cattura webcam (CameraStream)
 │   ├── face_processor.py       # YOLO + InsightFace (FaceProcessor)
 │   ├── inference_worker.py     # Thread di inferenza
-│   ├── recognition_service.py  # Soglie, saluti con debouncing, apprendimento continuo
+│   ├── recognition_service.py  # Soglie, saluti, apprendimento continuo
+│   ├── greeting_policy.py      # Regole di "Benvenuto" e "Bentornato" (GreetingPolicy)
 │   ├── database_manager.py     # PostgreSQL + pgvector (DatabaseManager)
+│   ├── new_face_selector.py    # Scelta del volto sconosciuto da registrare (NewFaceSelector)
 │   ├── enrollment.py           # Registrazione dei nuovi volti (EnrollmentSession)
 │   └── ui_controller.py        # Interfaccia OpenCV (UIController)
 ├── sql/init.sql                # Schema del database
@@ -148,9 +150,11 @@ Al primo avvio InsightFace scarica il pacchetto di modelli `buffalo_l` (circa 28
 
 ## 10. Come si usa
 
-- **Persona già registrata:** compare un riquadro verde con nome e similarità, e il saluto "Bentornato, Nome!". La stessa persona viene salutata al massimo una volta ogni 5 minuti.
-- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta inquadrato da solo per circa un secondo e mezzo, abbastanza vicino alla webcam, compare la richiesta di nome. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Con ESC annulli: il sistema non ti riproporrà la registrazione per 60 secondi.
-- **Durante la cattura** il pannello in basso spiega perché un campione viene scartato: volto troppo lontano, immagine sfocata (con il valore misurato e quello minimo), più volti nel fotogramma, oppure volto che appartiene a un profilo già registrato. In quest'ultimo caso la registrazione non prosegue, per non creare un doppione.
+- **Persona già registrata:** compare un riquadro verde con nome e similarità. Il saluto "Bentornato, Nome!" compare solo quando la persona rientra nell'inquadratura dopo esserne rimasta fuori per almeno 10 minuti (`WELCOME_BACK_ABSENCE_SECONDS`), contati dall'ultimo istante in cui è stata vista. Chi resta davanti alla webcam non viene salutato di nuovo.
+- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta sconosciuto e abbastanza vicino alla webcam per circa un secondo e mezzo, compare la richiesta di nome e il suo riquadro diventa arancione ("In registrazione"). Con più volti nell'inquadratura viene scelto quello sconosciuto più vicino; le persone già note non bloccano la registrazione. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Al termine compare "Benvenuto, Nome!", una sola volta. Con ESC annulli: il sistema non riproporrà registrazioni per 60 secondi.
+- **Durante la cattura** il sistema segue solo il volto che ha fatto comparire la richiesta e ignora gli altri. Il pannello in basso spiega perché un campione viene scartato: volto troppo lontano, immagine sfocata (con il valore misurato e quello minimo), volto non più presente, oppure volto che appartiene a un profilo già registrato.
+- **Richiesta ritirata in automatico:** se il volto in registrazione viene riconosciuto come persona già presente nel database per due risultati di fila, la registrazione si annulla per non creare un doppione. Se il volto si allontana per 10 secondi prima che sia stato digitato qualcosa, la richiesta di nome si chiude da sola.
+- **Più messaggi insieme:** i messaggi in alto vengono impilati (fino a tre), così un saluto non ne copre un altro.
 - **Database non raggiungibile:** la barra di stato mostra `DB: ERRORE` e i volti compaiono in grigio come "Non verificato". Il riconoscimento riprende da solo quando il database torna disponibile.
 - **Apprendimento continuo:** i riconoscimenti molto sicuri arricchiscono il profilo con nuovi embedding mediati, al massimo ogni 10 minuti.
 
@@ -176,6 +180,7 @@ Se il sistema serve a rilevare presenze o a controllare dipendenti, in Italia si
 - **`password authentication failed`:** la password in `.env` è diversa da quella con cui è stato creato il database, oppure contiene caratteri speciali (sezione 3).
 - **La cattura resta ferma su "Immagine sfocata":** il messaggio mostra la nitidezza misurata e quella minima. Migliora la luce, oppure abbassa `MIN_SHARPNESS` in `.env` fino a un valore di poco inferiore a quello misurato.
 - **La richiesta del nome compare troppo presto o troppo tardi:** regola `UNKNOWN_CONFIRM_SECONDS` in `.env`.
+- **"Bentornato" non compare:** è previsto se la persona è stata vista negli ultimi 10 minuti. Il tempo si regola con `WELCOME_BACK_ABSENCE_SECONDS` in `.env`. La vecchia variabile `GREETING_COOLDOWN_SECONDS` non viene più letta e si può cancellare.
 - **Schermo nero o webcam non trovata:** cambia `CAMERA_INDEX` in `.env` (prova 0, 1, 2...) e riavvia l'app.
 - **`Connessione a PostgreSQL non riuscita`:** verifica con `docker compose ps`. Se la porta 5432 è occupata da un altro PostgreSQL, cambia `DB_PORT` in `.env` e rilancia `docker compose up -d`.
 - **`Estensione pgvector non attiva` o tabella mancante:** ricrea il database con `docker compose down -v` seguito da `docker compose up -d`. Attenzione: il comando cancella tutti i dati.

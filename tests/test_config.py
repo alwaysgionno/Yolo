@@ -28,6 +28,7 @@ class ValidationTest(unittest.TestCase):
             "dimensione non multipla di 32": {"insightface_det_size": 300},
             "batch nullo": {"continuous_batch_size": 0},
             "attesa negativa": {"unknown_confirm_seconds": -1.0},
+            "assenza negativa": {"welcome_back_absence_seconds": -1.0},
         }
         for label, overrides in cases.items():
             with self.subTest(label):
@@ -73,6 +74,12 @@ class EnvFileTest(unittest.TestCase):
         settings = self.load(example.replace("cambia_questa_password_forte", "una-password-di-prova"))
         self.assertEqual(settings.enrollment_samples, 8)
         self.assertEqual(settings.unknown_confirm_seconds, 1.5)
+        self.assertEqual(settings.welcome_back_absence_seconds, 600.0)
+
+    def test_old_greeting_cooldown_is_ignored(self) -> None:
+        # Un .env precedente puo contenere ancora la vecchia variabile: non deve accorciare l'assenza richiesta
+        settings = self.load("DB_PASSWORD=una-password-di-prova\nGREETING_COOLDOWN_SECONDS=300\n")
+        self.assertEqual(settings.welcome_back_absence_seconds, 600.0)
 
 
 if __name__ == "__main__":
