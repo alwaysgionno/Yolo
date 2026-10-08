@@ -24,14 +24,14 @@ class GreetingPolicy:
     def __init__(self, absence_seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
         self._absence_seconds = absence_seconds
         self._clock = clock
-        self._last_seen: dict[int, float] = {}
+        self._last_seen: dict[str, float] = {}
 
-    def observe(self, person_id: int, last_access_age_s: float | None) -> GreetingKind | None:
+    def observe(self, person_id: str, last_access_age_s: float | None) -> GreetingKind | None:
         """Registra un avvistamento e restituisce il saluto dovuto, oppure None.
 
         Args:
             person_id: persona riconosciuta nel fotogramma corrente.
-            last_access_age_s: secondi dall'ultimo accesso salvato nel database, None se la
+            last_access_age_s: secondi dall'ultimo saluto noto alla galleria, None se la
                 persona non e mai stata salutata. Conta solo al primo avvistamento dopo
                 l'avvio, quando in memoria non c'e ancora uno storico.
         """

@@ -16,10 +16,10 @@ BBox = tuple[int, int, int, int]
 class Match:
     """Persona riconosciuta, con la similarita coseno rispetto al vettore piu vicino."""
 
-    person_id: int
+    person_id: str  # uid della persona: lo stesso usato dal server
     full_name: str
     similarity: float  # tra -1 e 1; 1 significa vettori identici
-    last_access_age_s: float | None = None  # secondi dall'ultimo accesso salvato; None se mai salutata
+    last_access_age_s: float | None = None  # secondi dall'ultimo saluto noto; None se mai salutata
 
 
 class GreetingKind(Enum):
@@ -56,5 +56,5 @@ class FrameResult:
     frame_id: int
     detections: list[FaceDetection] = field(default_factory=list)
     inference_ms: float = 0.0
-    db_ok: bool = True  # False se il database non ha risposto durante il riconoscimento
+    gallery_ok: bool = True  # False se la galleria non era ancora arrivata dal server: volti non confrontati
     created_at: float = field(default_factory=time.monotonic)  # istante di pubblicazione (orologio monotono)

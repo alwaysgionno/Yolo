@@ -4,7 +4,7 @@
 #
 #  PREREQUISITI (da installare prima di tutto)
 #   - Python 3.11 (oppure 3.10). Non usare Python 3.13 o superiori.
-#   - Docker Desktop (per PostgreSQL con pgvector).
+#   - Il server Face Access raggiungibile in rete (repository face-access-server: broker MQTT, database).
 #   - Solo Windows: "Build Tools per Visual Studio" con il carico di lavoro
 #     "Sviluppo di applicazioni desktop con C++" (serve a compilare insightface).
 #
@@ -24,7 +24,7 @@
 #   ultralytics 8.3.0        -> YOLOv8: rilevamento rapido dei volti nel fotogramma
 #   insightface 0.7.3        -> ArcFace: genera l'embedding biometrico del volto (512 valori)
 #   onnxruntime 1.19.2       -> motore di esecuzione dei modelli ONNX di InsightFace (su CPU)
-#   psycopg2-binary 2.9.9    -> driver che permette a Python di dialogare con PostgreSQL
+#   paho-mqtt 2.1.0          -> client MQTT: riceve la galleria dal server e gli invia gli eventi
 #   python-dotenv 1.0.1      -> legge le credenziali e i parametri dal file .env
 #
 #  Altre librerie (torch, torchvision, matplotlib, pandas, scipy, scikit-learn,
@@ -40,5 +40,5 @@ numpy==1.26.4
 ultralytics==8.3.0
 insightface==0.7.3
 onnxruntime==1.19.2
-psycopg2-binary==2.9.9
+paho-mqtt==2.1.0
 python-dotenv==1.0.1

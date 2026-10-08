@@ -7,10 +7,10 @@ from unittest import mock
 
 import numpy as np
 
-from app.database_manager import DatabaseError
+from app.person_store import StoreError
 from app.models import Greeting, GreetingKind, Match
 from app.recognition_service import RecognitionService
-from tests.helpers import FakeClock, FakeDatabase, face_vector, make_detection, make_settings
+from tests.helpers import FakeClock, FakeStore, face_vector, make_detection, make_settings
 
 WELCOME_MARIO = Greeting(GreetingKind.WELCOME, "Mario")
 WELCOME_BACK_MARIO = Greeting(GreetingKind.WELCOME_BACK, "Mario")
@@ -19,7 +19,7 @@ WELCOME_BACK_MARIO = Greeting(GreetingKind.WELCOME_BACK, "Mario")
 class RecognitionServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.clock = FakeClock()
-        self.db = FakeDatabase()
+        self.db = FakeStore()
         self.service = RecognitionService(make_settings(), self.db, clock=self.clock)
 
     def see(
@@ -32,34 +32,34 @@ class RecognitionServiceTestCase(unittest.TestCase):
     ) -> list[Greeting]:
         """Simula un fotogramma in cui il vicino piu simile e Mario con la similarita indicata.
 
-        `last_access_age_s` e l'eta dell'ultimo accesso salvato nel database (None: mai salutato).
+        `last_access_age_s` e l'eta dell'ultimo saluto noto alla galleria (None: mai salutato).
         """
-        self.db.nearest = [Match(1, "Mario", similarity, last_access_age_s), Match(2, "Anna", 0.10)]
+        self.db.nearest = [Match("uid-mario", "Mario", similarity, last_access_age_s), Match("uid-anna", "Anna", 0.10)]
         return self.service.process([make_detection(face_vector(axis), sharpness=sharpness)])
 
 
 class ThresholdTest(RecognitionServiceTestCase):
     def test_face_below_threshold_stays_unknown(self) -> None:
-        self.db.nearest = [Match(1, "Mario", 0.39)]
+        self.db.nearest = [Match("uid-mario", "Mario", 0.39)]
         detection = make_detection()
         self.assertEqual(self.service.process([detection]), [])
         self.assertIsNone(detection.match)
         self.assertEqual(self.db.greetings, [])
 
-    def test_empty_database_means_unknown(self) -> None:
+    def test_empty_gallery_means_unknown(self) -> None:
         detection = make_detection()
         self.assertEqual(self.service.process([detection]), [])
         self.assertIsNone(detection.match)
 
     def test_face_at_threshold_is_recognized(self) -> None:
-        self.db.nearest = [Match(1, "Mario", 0.40)]
+        self.db.nearest = [Match("uid-mario", "Mario", 0.40)]
         detection = make_detection()
         self.assertEqual(self.service.process([detection]), [WELCOME_MARIO])
-        self.assertEqual(detection.match, Match(1, "Mario", 0.40))
+        self.assertEqual(detection.match, Match("uid-mario", "Mario", 0.40))
 
-    def test_database_failure_is_reported_to_the_caller(self) -> None:
+    def test_missing_gallery_is_reported_to_the_caller(self) -> None:
         self.db.failing.add("find_nearest")
-        with self.assertRaises(DatabaseError):
+        with self.assertRaises(StoreError):
             self.service.process([make_detection()])
 
 
@@ -68,7 +68,7 @@ class GreetingTest(RecognitionServiceTestCase):
         self.assertEqual(self.see(0.45), [WELCOME_MARIO])
         self.clock.advance(1.0)
         self.assertEqual(self.see(0.45), [])
-        self.assertEqual(self.db.greetings, [(1, 0.45)])
+        self.assertEqual(self.db.greetings, [("uid-mario", 0.45)])
 
     def test_no_greeting_while_the_person_stays_in_view(self) -> None:
         self.see(0.45)
@@ -84,7 +84,7 @@ class GreetingTest(RecognitionServiceTestCase):
         self.assertEqual(self.see(0.45), [])
         self.clock.advance(600.0)
         self.assertEqual(self.see(0.47), [WELCOME_BACK_MARIO])
-        self.assertEqual(self.db.greetings, [(1, 0.47)])
+        self.assertEqual(self.db.greetings, [("uid-mario", 0.47)])
 
     def test_person_just_enrolled_is_not_greeted_again(self) -> None:
         # create_person valorizza last_access_at: al primo riconoscimento l'ultimo accesso e di pochi istanti fa
@@ -95,7 +95,7 @@ class GreetingTest(RecognitionServiceTestCase):
         self.assertEqual(self.see(0.60, last_access_age_s=600.0), [WELCOME_BACK_MARIO])
 
     def test_same_person_detected_twice_is_greeted_once(self) -> None:
-        self.db.nearest = [Match(1, "Mario", 0.70)]
+        self.db.nearest = [Match("uid-mario", "Mario", 0.70)]
         self.assertEqual(self.service.process([make_detection(), make_detection()]), [WELCOME_MARIO])
 
     def test_greeting_is_shown_even_if_the_log_cannot_be_written(self) -> None:
@@ -103,13 +103,13 @@ class GreetingTest(RecognitionServiceTestCase):
         self.assertEqual(self.see(0.45), [WELCOME_MARIO])
         self.assertEqual(self.db.greetings, [])
 
-    def test_database_failure_in_the_middle_of_a_frame_does_not_lose_greetings(self) -> None:
-        mario, anna = [Match(1, "Mario", 0.70)], [Match(2, "Anna", 0.70, last_access_age_s=900.0)]
+    def test_failure_in_the_middle_of_a_frame_does_not_lose_greetings(self) -> None:
+        mario, anna = [Match("uid-mario", "Mario", 0.70)], [Match("uid-anna", "Anna", 0.70, last_access_age_s=900.0)]
         faces = [make_detection(), make_detection()]
 
         # Mario viene identificato, poi la ricerca di Anna fallisce: nessun saluto deve andare perso
-        with mock.patch.object(self.db, "find_nearest", side_effect=[mario, DatabaseError("simulato")]):
-            with self.assertRaises(DatabaseError):
+        with mock.patch.object(self.db, "find_nearest", side_effect=[mario, StoreError("simulato")]):
+            with self.assertRaises(StoreError):
                 self.service.process(faces)
         self.assertEqual(self.db.greetings, [])
 
@@ -131,9 +131,8 @@ class ContinuousLearningTest(RecognitionServiceTestCase):
         self.see(0.80, axis=3, sharpness=100.0)
 
         self.assertEqual(len(self.db.continuous), 1)
-        person_id, embedding, quality, max_stored = self.db.continuous[0]
-        self.assertEqual(person_id, 1)
-        self.assertEqual(max_stored, 20)
+        person_id, embedding, quality = self.db.continuous[0]
+        self.assertEqual(person_id, "uid-mario")
         self.assertAlmostEqual(quality, 90.0, places=3)
         self.assertAlmostEqual(float(np.linalg.norm(embedding)), 1.0, places=5)
         for axis in (1, 2, 3):

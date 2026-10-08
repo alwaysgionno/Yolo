@@ -19,12 +19,12 @@ class ValidationTest(unittest.TestCase):
 
     def test_invalid_values_are_refused(self) -> None:
         cases = {
-            "password di esempio": {"db_password": "cambia_questa_password_forte"},
+            "password di esempio": {"mqtt_password": "cambia_la_password_della_telecamera"},
             "soglia fuori intervallo": {"recognition_threshold": 1.2},
             "apprendimento sotto il riconoscimento": {"continuous_learning_threshold": 0.30},
             "pochi campioni": {"enrollment_samples": 4},
             "troppi campioni": {"enrollment_samples": 11},
-            "porta non valida": {"db_port": 70000},
+            "porta non valida": {"mqtt_port": 70000},
             "dimensione non multipla di 32": {"insightface_det_size": 300},
             "batch nullo": {"continuous_batch_size": 0},
             "attesa negativa": {"unknown_confirm_seconds": -1.0},
@@ -46,11 +46,11 @@ class EnvFileTest(unittest.TestCase):
                 return Settings.from_env()
 
     def test_values_and_defaults(self) -> None:
-        settings = self.load("DB_PASSWORD=una-password-di-prova\nCAMERA_INDEX=2\nRECOGNITION_THRESHOLD=0.45\n")
-        self.assertEqual(settings.db_password, "una-password-di-prova")
+        settings = self.load("MQTT_PASSWORD=una-password-di-prova\nCAMERA_INDEX=2\nRECOGNITION_THRESHOLD=0.45\n")
+        self.assertEqual(settings.mqtt_password, "una-password-di-prova")
         self.assertEqual(settings.camera_index, 2)
         self.assertEqual(settings.recognition_threshold, 0.45)
-        self.assertEqual(settings.db_name, "face_access")
+        self.assertEqual(settings.mqtt_username, "camera")
         self.assertEqual(settings.unknown_confirm_seconds, 1.5)
         self.assertTrue(settings.yolo_model_path.is_absolute())
 
@@ -60,7 +60,7 @@ class EnvFileTest(unittest.TestCase):
 
     def test_wrong_number_is_refused(self) -> None:
         with self.assertRaises(ConfigurationError):
-            self.load("DB_PASSWORD=una-password-di-prova\nDB_PORT=cinquemila\n")
+            self.load("MQTT_PASSWORD=una-password-di-prova\nMQTT_PORT=cinquemila\n")
 
     def test_missing_file_is_refused(self) -> None:
         with mock.patch.object(config, "ENV_FILE", Path("questo_file_non_esiste.env")):
@@ -71,14 +71,14 @@ class EnvFileTest(unittest.TestCase):
         example = (config.PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
         with self.assertRaises(ConfigurationError):
             self.load(example)  # la password di esempio non e accettata
-        settings = self.load(example.replace("cambia_questa_password_forte", "una-password-di-prova"))
+        settings = self.load(example.replace("cambia_la_password_della_telecamera", "una-password-di-prova"))
         self.assertEqual(settings.enrollment_samples, 8)
         self.assertEqual(settings.unknown_confirm_seconds, 1.5)
         self.assertEqual(settings.welcome_back_absence_seconds, 600.0)
 
     def test_old_greeting_cooldown_is_ignored(self) -> None:
         # Un .env precedente puo contenere ancora la vecchia variabile: non deve accorciare l'assenza richiesta
-        settings = self.load("DB_PASSWORD=una-password-di-prova\nGREETING_COOLDOWN_SECONDS=300\n")
+        settings = self.load("MQTT_PASSWORD=una-password-di-prova\nGREETING_COOLDOWN_SECONDS=300\n")
         self.assertEqual(settings.welcome_back_absence_seconds, 600.0)
 
 
