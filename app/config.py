@@ -54,6 +54,18 @@ def _get_float(name: str, default: float) -> float:
         raise ConfigurationError(f"{name} deve essere un numero, trovato: {raw!r}") from exc
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    """Legge un valore si/no (1, 0, true, false, si, no), restituendo il predefinito se non impostato."""
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "si", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigurationError(f"{name} deve valere 1 oppure 0, trovato: {raw!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     """Parametri di esecuzione, caricati una sola volta all'avvio."""
@@ -79,6 +91,10 @@ class Settings:
     # Soglie di riconoscimento (similarita coseno, valori tra 0 e 1)
     recognition_threshold: float
     continuous_learning_threshold: float
+
+    # Anti-spoofing: verifica che il volto sia tridimensionale (app/liveness.py)
+    liveness_check: bool
+    liveness_min_parallax: float
 
     # Comportamento applicativo
     welcome_back_absence_seconds: float
@@ -125,6 +141,8 @@ class Settings:
             insightface_det_size=_get_int("INSIGHTFACE_DET_SIZE", 320),
             recognition_threshold=_get_float("RECOGNITION_THRESHOLD", 0.40),
             continuous_learning_threshold=_get_float("CONTINUOUS_LEARNING_THRESHOLD", 0.55),
+            liveness_check=_get_bool("LIVENESS_CHECK", True),
+            liveness_min_parallax=_get_float("LIVENESS_MIN_PARALLAX", 0.07),
             welcome_back_absence_seconds=_get_float("WELCOME_BACK_ABSENCE_SECONDS", 600.0),
             unknown_snooze_seconds=_get_float("UNKNOWN_SNOOZE_SECONDS", 60.0),
             unknown_confirm_seconds=_get_float("UNKNOWN_CONFIRM_SECONDS", 1.5),
@@ -149,6 +167,7 @@ class Settings:
             ("YOLO_CONFIDENCE", self.yolo_confidence),
             ("RECOGNITION_THRESHOLD", self.recognition_threshold),
             ("CONTINUOUS_LEARNING_THRESHOLD", self.continuous_learning_threshold),
+            ("LIVENESS_MIN_PARALLAX", self.liveness_min_parallax),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ConfigurationError(f"{label} deve essere compreso tra 0 e 1")

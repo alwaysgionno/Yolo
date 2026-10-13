@@ -57,6 +57,7 @@ MAX_VISIBLE_TOASTS = 3
 MASK_OVERSAMPLING = 4            # le maschere sono disegnate ingrandite e poi ridotte: bordi morbidi
 THUMBNAIL_SIZE = 160             # lato della miniatura del volto conservata per la finestra del nome
 CARET_BLINK_S = 0.5
+LIVENESS_PROMPT_S = 2.0          # attesa prima di chiedere alla persona di girare la testa
 
 
 class ToastKind(Enum):
@@ -377,13 +378,20 @@ def _draw_detection(
 ) -> None:
     """Disegna il riquadro del volto con nome e similarita (verde) o 'Sconosciuto' (rosso).
 
+    Una persona riconosciuta ma non ancora verificata dall'anti-spoofing e mostrata in ambra:
+    dopo qualche istante compare l'invito a girare la testa.
     Il volto seguito dalla registrazione in corso (`enrolling`) e mostrato in ambra.
     Se la galleria non e ancora arrivata dal server (`verified` False) il volto non e stato confrontato:
     viene mostrato in grigio, senza indicarlo come sconosciuto.
     """
     x1, y1, x2, y2 = detection.bbox
     detail = ""
-    if detection.match is not None:
+    if detection.match is not None and detection.live is False:
+        color = COLOR_WARNING
+        label = detection.match.full_name
+        waiting = detection.liveness_wait_s < LIVENESS_PROMPT_S
+        detail = "verifica in corso" if waiting else "gira leggermente la testa"
+    elif detection.match is not None:
         color = COLOR_KNOWN
         label = detection.match.full_name
         detail = f"{detection.match.similarity:.2f}"

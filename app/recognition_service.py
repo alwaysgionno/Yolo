@@ -1,4 +1,4 @@
-"""Logica di riconoscimento: soglie, saluti e apprendimento continuo.
+"""Logica di riconoscimento: soglie, verifica anti-spoofing, saluti e apprendimento continuo.
 
 Tutto lo stato del servizio viene usato solo dal thread di inferenza: i saluti
 raggiungono la UI attraverso la coda dell'InferenceWorker.
@@ -16,6 +16,7 @@ import numpy as np
 from .config import Settings
 from .person_store import PersonStore, StoreError
 from .greeting_policy import GreetingPolicy
+from .liveness import LivenessTracker
 from .models import FaceDetection, Greeting, GreetingKind, Match
 
 logger = logging.getLogger(__name__)
@@ -29,11 +30,18 @@ class RecognitionService:
         settings: Settings,
         store: PersonStore,
         clock: Callable[[], float] = time.monotonic,
+        liveness: LivenessTracker | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._clock = clock
         self._greeting_policy = GreetingPolicy(settings.welcome_back_absence_seconds, clock)
+        # Verifica che i volti siano tridimensionali (None se disattivata con LIVENESS_CHECK=0)
+        if liveness is None and settings.liveness_check:
+            liveness = LivenessTracker(
+                settings.liveness_min_parallax, settings.min_face_width_px, settings.min_sharpness, clock
+            )
+        self._liveness = liveness
 
         # Stato dell'apprendimento continuo. Ogni buffer contiene coppie (embedding, nitidezza).
         self._learning_buffers: dict[str, list[tuple[np.ndarray, float]]] = defaultdict(list)
@@ -53,8 +61,13 @@ class RecognitionService:
         greetings: list[Greeting] = []
         for detection in detections:
             match = detection.match
+            live = self._liveness is None or self._liveness.observe(detection, match.person_id if match else None)
             if match is None:
                 continue  # volto sconosciuto: sara la UI a proporre la registrazione
+            if not live:
+                # Potrebbe essere una foto: niente saluto, niente accesso registrato e niente apprendimento.
+                # Per la politica dei saluti la persona non e stata vista: il saluto arrivera a verifica riuscita.
+                continue
             kind = self._greeting_policy.observe(match.person_id, match.last_access_age_s)
             if kind is not None:
                 self._record_access(match, kind)

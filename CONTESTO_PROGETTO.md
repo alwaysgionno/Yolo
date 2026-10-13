@@ -20,7 +20,8 @@ Il sistema è diviso in due repository che comunicano solo via MQTT:
 3. **Nuovi volti.** Se la similarità massima è sotto `RECOGNITION_THRESHOLD` il volto è sconosciuto. Quando lo stesso volto sconosciuto resta nell'inquadratura per più risultati di inferenza consecutivi, una finestra al centro dello schermo chiede il nome. Poi vengono acquisiti da 5 a 10 campioni validi (`ENROLLMENT_SAMPLES`, predefinito 8).
 4. **Apprendimento continuo.** I riconoscimenti con similarità sopra `CONTINUOUS_LEARNING_THRESHOLD` arricchiscono il profilo. Gli embedding vengono mediati a gruppi e inviati al server come nuovi campioni.
 5. **Saluti.** "Benvenuto, Nome!" compare una sola volta, al primo riconoscimento della persona, che di norma coincide con la registrazione. "Bentornato, Nome!" compare solo quando la persona rientra nel campo visivo dopo un'assenza di almeno `WELCOME_BACK_ABSENCE_SECONDS` (predefinito 600), misurata dall'ultimo avvistamento. Ogni saluto viene pubblicato al server, che aggiorna `persons.last_access_at` e scrive una riga in `access_logs`.
-6. **Dati.** La telecamera non salva nulla su disco. Registrazioni, saluti ed embedding di apprendimento continuo vengono pubblicati via MQTT (QoS 1) e salvati dal server in tempo reale.
+6. **Anti-spoofing.** Una persona viene salutata o registrata solo dopo che il suo volto è stato verificato come tridimensionale: una foto mostrata alla webcam viene riconosciuta ma ignorata (sezione 8 bis).
+7. **Dati.** La telecamera non salva nulla su disco. Registrazioni, saluti ed embedding di apprendimento continuo vengono pubblicati via MQTT (QoS 1) e salvati dal server in tempo reale.
 
 ## 3. Stack tecnologico
 
@@ -41,6 +42,7 @@ Le versioni sono in `requirements.txt`, con la spiegazione di ogni libreria.
             InferenceWorker (thread "InferenceWorker")
               │  FaceProcessor:      YOLO → ritaglio con margine → InsightFace
               │  RecognitionService: find_nearest (galleria), soglia, apprendimento
+              │  LivenessTracker:    anti-spoofing, un volto alla volta (parallasse tra due immagini)
               │  GreetingPolicy:     presenza per persona, "Benvenuto" / "Bentornato"
               ▼
             FrameResult (ultimo risultato, protetto da lock) + coda dei saluti
@@ -63,6 +65,7 @@ Regole da rispettare:
 - YOLO e InsightFace vengono usati solo dal worker di inferenza.
 - `Gallery` è usata da tre thread (rete MQTT, inferenza, UI) ed è protetta da un lock. La matrice di ricerca viene sostituita per intero a ogni modifica: `find_nearest` legge sempre una coppia coerente (matrice, proprietari delle righe) senza trattenere il lock durante il calcolo.
 - Le callback di paho girano sul thread di rete: non devono sollevare eccezioni (fermerebbero il thread) né fare lavoro lungo.
+- Anche la verifica anti-spoofing (`LivenessTracker`, `parallax`) gira solo nel worker di inferenza: un confronto costa circa 25 ms e non deve finire nel thread della UI, che ne legge l'esito in `FaceDetection.live`.
 - Lo stato dei saluti (`GreetingPolicy`) è usato solo dal worker di inferenza: i saluti arrivano alla UI attraverso la coda dell'`InferenceWorker`, senza lock condivisi e senza chiamate dal thread principale.
 - Il ciclo UI attende il fotogramma successivo (`CameraStream.wait_for_frame`, al massimo 50 ms): gira alla velocità della webcam e non sottrae CPU all'inferenza.
 - Ogni `FrameResult` viene valutato per la registrazione una sola volta (confronto sul `frame_id`). I risultati più vecchi di 3 secondi, o arrivati mentre la webcam è scollegata, non vengono né disegnati né usati.
@@ -71,7 +74,7 @@ Regole da rispettare:
 
 1. YOLO con `classes=[0]`, soglia `YOLO_CONFIDENCE` e dimensione `YOLO_IMAGE_SIZE`. Restituisce i bounding box.
 2. Ritaglio del box con margine del 25%. Se il lato minore è sotto 160 px, il ritaglio viene ingrandito.
-3. `InsightFace.get(ritaglio)` restituisce, per ogni volto, l'embedding normalizzato L2 (512 valori) e il riquadro, che viene riportato alle coordinate del frame originale. Da questo riquadro derivano la larghezza del volto (`face_width`) e la nitidezza (`sharpness`), cioè la varianza del Laplaciano misurata solo sul volto e non sullo sfondo.
+3. `InsightFace.get(ritaglio)` restituisce, per ogni volto, l'embedding normalizzato L2 (512 valori) e il riquadro, che viene riportato alle coordinate del frame originale. Da questo riquadro derivano la larghezza del volto (`face_width`) e la nitidezza (`sharpness`), cioè la varianza del Laplaciano misurata solo sul volto e non sullo sfondo. Con i 5 punti del volto (`kps`) il ritaglio viene anche raddrizzato in un'immagine 160x160 in scala di grigi (`FaceDetection.patch`, `align_face`), usata dall'anti-spoofing.
    - Con i pesi per volti (`yolov8n-face.pt`) si tiene, per ogni ritaglio, il volto con `det_score` più alto.
    - Con il modello generico il ritaglio è una persona intera e può contenere anche i volti dei vicini: si tengono tutti, e a schermo viene mostrato il riquadro del volto.
    - Un volto che tocca un bordo interno del ritaglio è tagliato a metà e viene scartato: il suo embedding sarebbe inaffidabile.
@@ -89,6 +92,7 @@ Stati: `IDLE → NAME_INPUT → CAPTURING → COMPLETED | CANCELLED`.
 - **Avvio (`consider_start`):** quando il selettore conferma un volto, fuori dal periodo di snooze (`UNKNOWN_SNOOZE_SECONDS`, predefinito 60 secondi dopo un annullamento). La sessione riceve l'embedding del volto e da quel momento segue solo quello (`candidate_in`), ignorando gli altri. Nella UI il suo riquadro è color ambra, "In registrazione", e il video viene scurito dietro la finestra del nome, che mostra la miniatura del volto, il campo di testo e i tasti disponibili.
 - **Nome:** almeno 2 caratteri, senza duplicati (confronto senza distinzione di maiuscole, sui nomi della galleria comprese le persone disattivate). Timeout di 60 secondi. Se il volto non viene visto per 10 secondi (`CANDIDATE_LOST_TIMEOUT_S`) prima che sia stato digitato un carattere, la richiesta viene ritirata senza snooze.
 - **Volto già registrato (`offer_frame`):** se il volto seguito viene riconosciuto come persona nota in 2 risultati consecutivi (`KNOWN_FACE_CONFIRMATIONS`), la registrazione viene annullata con snooze, sia durante il nome sia durante la cattura. I fotogrammi in cui risulta noto non diventano mai campioni.
+- **Verifica del volto:** la sessione ricorda se il volto seguito è stato verificato dall'anti-spoofing (`candidate.live`, in qualunque momento da quando compare la richiesta del nome). A campioni completi il profilo viene salvato solo se la verifica è riuscita; altrimenti il pannello chiede di girare la testa e, allo scadere dei 30 secondi di cattura, la registrazione si annulla con "Volto non verificato".
 - **Campione valido (`offer_frame`):** il volto seguito, non riconosciuto come persona già registrata, `face_width ≥ MIN_FACE_WIDTH_PX` (90), nitidezza `≥ MIN_SHARPNESS` (60), similarità con il primo campione `≥ 0.50` (stessa persona), similarità con gli altri campioni `≤ 0.985` (varietà), intervallo minimo di 0.4 secondi tra due campioni. Timeout di 30 secondi per la cattura.
 - **Salvataggio (`PersonStore.create_person`):** genera l'uid della persona (UUID), pubblica l'evento `enrolled` con nome e campioni e aggiunge subito la persona alla galleria locale, con l'ultimo accesso a questo istante. Il server salva in una sola transazione persona, embedding (`source='enrollment'`) e riga `ENROLLED`. Al termine la UI mostra "Profilo creato. Benvenuto, Nome!". Se il server rifiuta la registrazione (nome già usato) pubblica un messaggio vuoto e la persona viene rimossa dalla galleria.
 - **Dopo il salvataggio:** `FaceAccessApp` ignora i risultati di inferenza calcolati sui fotogrammi precedenti, che vedono ancora la persona come sconosciuta. Senza questo controllo la richiesta del nome ricomparirebbe subito.
@@ -115,6 +119,17 @@ Il server la salva con `source='continuous'`, elimina i campioni più vecchi olt
 
 I toast della UI sono in coda (`UIController.show_toast`): fino a 3 messaggi sono visibili impilati, gli altri attendono il loro turno, e ognuno resta a schermo per tutta la sua durata. Ogni messaggio ha un tipo (`ToastKind`): i saluti sono più grandi e verdi, gli annullamenti sono avvisi color ambra.
 
+## 8 bis. Anti-spoofing (`app/liveness.py`)
+
+Una testa vera che gira anche di poco mostra parallasse: naso, guance e fronte, che stanno a profondità diverse, si spostano in modo diverso. Una foto è un piano: comunque venga inclinata, tutti i suoi punti seguono una sola omografia.
+
+- **`parallax(reference, current)`:** confronta due ritagli allineati dello stesso volto. Segue alcuni punti con il flusso ottico (Lucas-Kanade) per una prima stima affine robusta, rifinisce un'omografia su tutti i pixel del volto (`cv2.findTransformECC`, dentro una maschera ellittica che esclude sfondo e bordi), sovrappone la seconda immagine alla prima e misura il movimento rimasto con il flusso ottico denso (DIS). Restituisce il 90° percentile del movimento, in frazioni della distanza tra gli occhi; `None` se il confronto non è misurabile (poco dettaglio, sovrapposizione non credibile o peggiorativa).
+- **Perché i pixel e non i punti del volto:** i modelli che stimano i punti (i 5 di SCRFD, i 106 e i 68 di InsightFace) davanti a una foto inclinata "immaginano" la forma di una testa girata. Misurato sulle immagini di esempio: una foto inclinata di 30° produce lo stesso scostamento del naso di una testa vera girata di 15-20°. Non usare i punti come prova di tridimensionalità.
+- **`LivenessCheck`:** una istanza per volto. Tiene un'immagine di riferimento; servono 2 confronti (`CONFIRMATIONS`) sopra `LIVENESS_MIN_PARALLAX` contro lo stesso riferimento, a distanza di almeno 0.25 secondi. Senza conferme il riferimento viene rinnovato ogni 4 secondi. A verifica riuscita l'immagine di riferimento viene scartata.
+- **`LivenessTracker`:** usato da `RecognitionService.process` per ogni volto. Le persone riconosciute sono seguite per uid, i volti sconosciuti per somiglianza degli embedding (`≥ 0.50`, al massimo 8). Usa solo fotogrammi con `face_width ≥ MIN_FACE_WIDTH_PX` e nitidezza `≥ MIN_SHARPNESS`. Scrive l'esito in `FaceDetection.live` (`None` se la verifica è disattivata) e l'attesa in `liveness_wait_s`. Un volto verificato resta tale finché non sparisce per 30 secondi (`HOLD_SECONDS`).
+- **Effetti:** finché una persona riconosciuta non è verificata, `RecognitionService` non chiama `GreetingPolicy.observe`, non pubblica l'accesso e non alimenta l'apprendimento continuo: per i saluti è come se non fosse stata vista, e il saluto arriva a verifica riuscita. La UI mostra il riquadro color ambra con "verifica in corso" e, dopo 2 secondi, "gira leggermente la testa".
+- **Taratura (13 ottobre 2026, solo in simulazione):** foto piatte deformate con omografie fino a 45° e teste "vere" ottenute spostando i pixel secondo la profondità dei 68 punti 3D, con rumore, sfocatura e scala di una webcam, su 8 volti delle immagini di esempio (94-144 px). Foto: massimo 0.052 su 594 confronti. Testa girata di almeno 10°: minimo 0.064, mediana 0.14. Attraverso `FaceProcessor._extract_faces` e `LivenessTracker`: 0 sequenze di foto agitata verificate su 32; 31 su 32 con la testa che oscilla di 8-15° (in mediana dopo 7-10 risultati di inferenza); 0 su 16 con la testa ferma. **Non provato con una webcam e con persone reali.**
+
 ## 9. Galleria locale e collegamento MQTT
 
 Il contratto completo è in `docs/mqtt-contract.md` della repository del server; `app/contract.py` ne contiene topic e codifiche. Tutti i messaggi sono JSON con QoS 1; un embedding è il base64 di 512 float32 little-endian.
@@ -138,6 +153,8 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 | INSIGHTFACE_MODEL / INSIGHTFACE_DET_SIZE | buffalo_l / 320 | Modello InsightFace e risoluzione del rilevatore interno (multiplo di 32) |
 | RECOGNITION_THRESHOLD | 0.40 | Soglia di riconoscimento (similarità coseno) |
 | CONTINUOUS_LEARNING_THRESHOLD | 0.55 | Soglia per l'apprendimento continuo (deve essere ≥ della soglia di riconoscimento) |
+| LIVENESS_CHECK | 1 | Anti-spoofing: 1 attivo, 0 disattivato |
+| LIVENESS_MIN_PARALLAX | 0.07 | Parallasse minimo (in frazioni della distanza tra gli occhi) che distingue una testa vera da una foto. Più alto = più severo |
 | WELCOME_BACK_ABSENCE_SECONDS | 600 | Assenza minima dal campo visivo prima di "Bentornato". Sostituisce `GREETING_COOLDOWN_SECONDS`, che non viene più letta |
 | UNKNOWN_SNOOZE_SECONDS | 60 | Attesa prima di riproporre una registrazione annullata |
 | UNKNOWN_CONFIRM_SECONDS | 1.5 | Tempo per cui un volto sconosciuto deve restare inquadrato prima della richiesta del nome |
@@ -158,6 +175,7 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 - `app/contract.py`: topic MQTT, codifica di embedding e date, `ContractError`
 - `app/recognition_service.py`: `RecognitionService`, soglia, saluti, apprendimento continuo
 - `app/greeting_policy.py`: `GreetingPolicy`, regole di "Benvenuto" e "Bentornato"
+- `app/liveness.py`: `align_face`, `parallax`, `LivenessCheck`, `LivenessTracker`, anti-spoofing
 - `app/inference_worker.py`: `InferenceWorker`, thread di inferenza, risultati, coda dei saluti
 - `app/new_face_selector.py`: `NewFaceSelector`, `find_same_face`, scelta e conferma del volto sconosciuto
 - `app/enrollment.py`: `EnrollmentSession`, `EnrollmentState`, registrazione del volto selezionato
@@ -178,6 +196,8 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 
 - Senza pesi `yolov8n-face.pt` si usa il rilevamento di persone: un volto viene trovato solo se YOLO riconosce la persona, e ogni persona in più nel fotogramma allunga l'inferenza (circa 0.2 secondi con una o due persone, 0.7 con sei).
 - Un volto già registrato, visto con similarità sotto soglia (occhiali, angolazione estrema, scarsa luce), viene trattato come sconosciuto. Se resta sotto soglia per tutta la durata della conferma e della cattura, il sistema può ancora proporre e completare una registrazione duplicata; se torna sopra soglia per due risultati consecutivi, la registrazione viene annullata.
+- L'anti-spoofing ferma le foto, non i video: una registrazione della persona che muove la testa, riprodotta su uno schermo, supera la verifica. Lo stesso vale per una foto curvata o una maschera. Le soglie sono tarate solo in simulazione: riflessi su uno schermo, luce che cambia e scatti della webcam non sono stati provati.
+- Chi resta immobile non viene verificato, quindi non viene salutato finché non muove la testa. Una persona troppo lontana o sfocata per la verifica non risulta "vista": se si avvicina dopo più di 10 minuti riceve "Bentornato" anche se era nell'inquadratura.
 - I nomi si digitano solo con caratteri ASCII: niente lettere accentate, perché `cv2.waitKey` restituisce solo il codice ASCII del tasto.
 - Il traffico MQTT non è cifrato: password ed embedding viaggiano in chiaro sulla rete locale.
 - Gli eventi in coda vivono solo in memoria: se l'applicazione viene chiusa mentre il server non è raggiungibile vanno persi (alla chiusura attende al massimo 3 secondi). Una persona registrata in quel momento esisterebbe solo nella galleria locale e sparirebbe al riavvio.
@@ -201,6 +221,7 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 
 ## 14. Possibili evoluzioni
 
+- Anti-spoofing contro i video: un modello passivo (ad esempio MiniFASNet in ONNX) oppure una richiesta casuale ("gira a sinistra") da verificare con la direzione del parallasse.
 - Tracking tra fotogrammi (ad esempio ByteTrack o IoU) per evitare identificazioni ripetute.
 - GPU con `onnxruntime-gpu` e PyTorch con CUDA.
 - Interfaccia Tkinter o PySide6 al posto di OpenCV.
@@ -220,3 +241,4 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 - La telecamera non deve accedere al database né salvare embedding su disco.
 - Se aggiungi dipendenze, aggiornale in `requirements.txt` con la versione fissata e una riga di spiegazione.
 - Chiedi conferma prima di modifiche che toccano dati biometrici, conservazione dei dati, trasmissione in rete o soglie di sicurezza.
+- La verifica anti-spoofing deve restare nel worker di inferenza e le immagini del volto non vanno salvate su disco né inviate al server.

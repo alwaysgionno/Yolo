@@ -3,8 +3,11 @@
 Flusso (macchina a stati gestita dal thread della UI):
 
     IDLE -> NAME_INPUT (l'utente digita il nome)
-         -> CAPTURING (acquisizione di 5-10 campioni validi)
+         -> CAPTURING (acquisizione di 5-10 campioni validi e verifica anti-spoofing)
          -> COMPLETED (profilo inviato al server)   oppure   CANCELLED (annullato o scaduto)
+
+Il profilo viene salvato solo se il volto e stato verificato come tridimensionale (vedi
+`app/liveness.py`): una foto mostrata alla webcam non puo essere registrata.
 
 La sessione segue un solo volto, quello scelto dal NewFaceSelector: gli altri volti
 presenti nel fotogramma vengono ignorati.
@@ -75,6 +78,7 @@ class EnrollmentSession:
         self._qualities: list[float] = []
         self._reference: np.ndarray | None = None  # embedding del volto in registrazione
         self._known_streak = 0
+        self._live = False  # True da quando il volto in registrazione ha superato la verifica anti-spoofing
         self._state_entered_at = 0.0
         self._candidate_seen_at = 0.0
         self._last_sample_at = float("-inf")
@@ -152,7 +156,8 @@ class EnrollmentSession:
 
         Viene seguito solo il volto selezionato all'avvio. Durante la cattura, se e valido,
         diventa un nuovo campione. Se risulta gia registrato in piu risultati consecutivi,
-        la registrazione viene annullata. Va chiamata una volta per ogni risultato di inferenza.
+        la registrazione viene annullata. Il profilo viene salvato quando i campioni sono
+        completi e il volto e stato verificato. Va chiamata una volta per ogni risultato di inferenza.
         """
         candidate = self.candidate_in(detections)
         if candidate is None:
@@ -173,9 +178,13 @@ class EnrollmentSession:
                 self._cancel(self.feedback, snooze=True)
             return
         self._known_streak = 0
+        if candidate.live is not False:  # None: verifica disattivata nelle impostazioni
+            self._live = True
 
         if self.state is EnrollmentState.CAPTURING:
-            self._add_sample(candidate)
+            if len(self._samples) < self._settings.enrollment_samples:
+                self._add_sample(candidate)
+            self._save_when_verified()
 
     def tick(self) -> None:
         """Annulla la registrazione se rimane ferma troppo a lungo in uno stato."""
@@ -187,7 +196,10 @@ class EnrollmentSession:
             elif not self.name and now - self._candidate_seen_at > CANDIDATE_LOST_TIMEOUT_S:
                 self._cancel("Registrazione annullata: volto non più presente", snooze=False)
         elif self.state is EnrollmentState.CAPTURING and elapsed > CAPTURE_TIMEOUT_S:
-            self._cancel("Cattura non completata: riprova", snooze=True)
+            if len(self._samples) >= self._settings.enrollment_samples:
+                self._cancel("Volto non verificato: serve una persona vera che giri la testa", snooze=True)
+            else:
+                self._cancel("Cattura non completata: riprova", snooze=True)
 
     def reset(self) -> None:
         """Riporta la sessione allo stato IDLE dopo aver gestito un esito finale."""
@@ -226,8 +238,14 @@ class EnrollmentSession:
         self.feedback = "Campione acquisito"
         logger.info("Campione di registrazione %d/%d acquisito", len(self._samples), settings.enrollment_samples)
 
-        if len(self._samples) >= settings.enrollment_samples:
+    def _save_when_verified(self) -> None:
+        """Salva il profilo quando i campioni sono completi e il volto non e una foto."""
+        if len(self._samples) < self._settings.enrollment_samples:
+            return
+        if self._live:
             self._save()
+        else:
+            self.feedback = "Ultimo passo: gira lentamente la testa a destra e a sinistra"
 
     def _confirm_name(self) -> None:
         """Valida il nome digitato e passa alla fase di cattura."""
@@ -272,4 +290,5 @@ class EnrollmentSession:
         self._qualities.clear()
         self._reference = None
         self._known_streak = 0
+        self._live = False
         self._last_sample_at = float("-inf")

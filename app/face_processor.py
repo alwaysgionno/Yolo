@@ -17,6 +17,7 @@ from insightface.app import FaceAnalysis
 from ultralytics import YOLO
 
 from .config import PROJECT_ROOT, Settings
+from .liveness import align_face
 from .models import BBox, FaceDetection
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class _Face(NamedTuple):
     vector: np.ndarray  # embedding normalizzato L2
     bbox: BBox          # riquadro del volto nel frame originale, in pixel
     det_score: float    # confidenza del rilevatore facciale di InsightFace
+    patch: np.ndarray | None  # volto allineato, usato dalla verifica anti-spoofing
 
 
 class FaceProcessor:
@@ -130,6 +132,7 @@ class FaceProcessor:
                     embedding=face.vector,
                     face_width=float(x2 - x1),
                     sharpness=_sharpness(frame[y1:y2, x1:x2]),
+                    patch=face.patch,
                 )
             )
         return detections
@@ -191,7 +194,9 @@ class FaceProcessor:
             )
             if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
                 continue
-            faces.append(_Face(raw / norm, bbox, float(found.det_score)))
+            # I 5 punti del volto sono nelle coordinate del ritaglio: il volto si allinea da li
+            patch = align_face(image, found.kps) if found.kps is not None else None
+            faces.append(_Face(raw / norm, bbox, float(found.det_score), patch))
         return faces
 
 

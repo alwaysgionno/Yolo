@@ -31,6 +31,8 @@ def make_settings(**overrides: object) -> Settings:
         "insightface_det_size": 320,
         "recognition_threshold": 0.40,
         "continuous_learning_threshold": 0.55,
+        "liveness_check": False,  # i test che la riguardano la attivano in modo esplicito
+        "liveness_min_parallax": 0.07,
         "welcome_back_absence_seconds": 600.0,
         "unknown_snooze_seconds": 60.0,
         "unknown_confirm_seconds": 1.5,
@@ -84,9 +86,13 @@ def make_detection(
     face_width: float = 150.0,
     sharpness: float = 120.0,
     match: Match | None = None,
+    live: bool | None = None,
+    patch: np.ndarray | None = None,
 ) -> FaceDetection:
     """Volto rilevato con qualita sufficiente, salvo diversa indicazione."""
     return FaceDetection(
+        live=live,
+        patch=patch,
         bbox=(100, 100, 250, 250),
         detector_confidence=0.9,
         embedding=face_vector(1) if embedding is None else embedding,

@@ -47,6 +47,9 @@ class FaceDetection:
     face_width: float = 0.0              # larghezza del volto in pixel (sul frame originale)
     sharpness: float = 0.0               # varianza del Laplaciano sul volto: piu alto = piu nitido
     match: Match | None = None           # valorizzato dal RecognitionService
+    patch: np.ndarray | None = None      # volto allineato in scala di grigi, per la verifica anti-spoofing
+    live: bool | None = None             # esito della verifica anti-spoofing; None se non e stata eseguita
+    liveness_wait_s: float = 0.0         # da quanti secondi il volto attende di essere verificato
 
 
 @dataclass

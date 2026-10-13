@@ -38,6 +38,7 @@ allenamento riconoscimento facciale AI/
 │   ├── face_processor.py       # YOLO + InsightFace (FaceProcessor)
 │   ├── inference_worker.py     # Thread di inferenza
 │   ├── recognition_service.py  # Soglie, saluti, apprendimento continuo
+│   ├── liveness.py             # Anti-spoofing: verifica che il volto non sia una foto (LivenessTracker)
 │   ├── greeting_policy.py      # Regole di "Benvenuto" e "Bentornato" (GreetingPolicy)
 │   ├── gallery.py              # Galleria locale delle persone registrate (Gallery)
 │   ├── mqtt_link.py            # Collegamento MQTT con il server (MqttLink)
@@ -148,7 +149,8 @@ Al primo avvio InsightFace scarica il pacchetto di modelli `buffalo_l` (circa 28
 ## 10. Come si usa
 
 - **Persona già registrata:** compare un riquadro verde con nome e similarità. Il saluto "Bentornato, Nome!" compare solo quando la persona rientra nell'inquadratura dopo esserne rimasta fuori per almeno 10 minuti (`WELCOME_BACK_ABSENCE_SECONDS`), contati dall'ultimo istante in cui è stata vista. Chi resta davanti alla webcam non viene salutato di nuovo.
-- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta sconosciuto e abbastanza vicino alla webcam per circa un secondo e mezzo, il video si scurisce, al centro compare una finestra per inserire il nome e il suo riquadro diventa color ambra ("In registrazione"). Con più volti nell'inquadratura viene scelto quello sconosciuto più vicino; le persone già note non bloccano la registrazione. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Al termine compare "Benvenuto, Nome!", una sola volta. Con ESC annulli: il sistema non riproporrà registrazioni per 60 secondi.
+- **Verifica anti-spoofing:** prima di salutare o registrare qualcuno, il sistema controlla che il volto sia tridimensionale e non una foto. Basta muovere la testa di una decina di gradi, cosa che di solito accade da sola mentre ci si avvicina: finché la verifica non è riuscita il riquadro è color ambra con "verifica in corso" e, dopo due secondi, "gira leggermente la testa". Una foto stampata o mostrata su un telefono resta color ambra: non viene salutata, non genera accessi e non può essere registrata. Un video della persona riprodotto su uno schermo, invece, supera la verifica. Si disattiva con `LIVENESS_CHECK=0` in `.env`.
+- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta sconosciuto e abbastanza vicino alla webcam per circa un secondo e mezzo, il video si scurisce, al centro compare una finestra per inserire il nome e il suo riquadro diventa color ambra ("In registrazione"). Con più volti nell'inquadratura viene scelto quello sconosciuto più vicino; le persone già note non bloccano la registrazione. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Se a campioni completi il volto non è ancora stato verificato, il pannello chiede di girare lentamente la testa a destra e a sinistra; senza verifica la registrazione si annulla dopo 30 secondi. Al termine compare "Benvenuto, Nome!", una sola volta. Con ESC annulli: il sistema non riproporrà registrazioni per 60 secondi.
 - **Durante la cattura** il sistema segue solo il volto che ha fatto comparire la richiesta e ignora gli altri. Il pannello in basso spiega perché un campione viene scartato: volto troppo lontano, immagine sfocata (con il valore misurato e quello minimo), volto non più presente, oppure volto che appartiene a un profilo già registrato.
 - **Richiesta ritirata in automatico:** se il volto in registrazione viene riconosciuto come persona già registrata per due risultati di fila, la registrazione si annulla per non creare un doppione. Se il volto si allontana per 10 secondi prima che sia stato digitato qualcosa, la richiesta di nome si chiude da sola.
 - **Più messaggi insieme:** i messaggi in alto vengono impilati (fino a tre), così un saluto non ne copre un altro.
@@ -164,9 +166,9 @@ Il sistema tratta dati biometrici, che il GDPR (art. 9) considera una categoria 
 
 - definisci la base giuridica, di norma un consenso esplicito, informato e revocabile;
 - informa gli interessati su finalità, tempi di conservazione e diritti;
-- il codice non salva immagini del volto, ma solo vettori numerici; restano comunque dati biometrici;
+- il codice non salva immagini del volto, ma solo vettori numerici; restano comunque dati biometrici. La verifica anti-spoofing tiene in memoria per pochi secondi un ritaglio del volto in scala di grigi, che non viene salvato né inviato;
 - la telecamera tiene i vettori solo in memoria e li riceve e li invia sulla rete locale, senza cifratura;
-- le persone si cancellano dal database del server (README di `face-access-server`): la telecamera le rimuove dalla propria galleria entro 30 secondi.
+- le persone si cancellano dal database del server (README di `face-access-server`): la telecamera le rimuove dalla propria galleria in un paio di secondi.
 
 Se il sistema serve a rilevare presenze o a controllare dipendenti, in Italia si applicano vincoli molto stringenti (in particolare l'art. 4 dello Statuto dei Lavoratori e i provvedimenti del Garante per la protezione dei dati personali). Prima di attivarlo in questi contesti consulta un professionista.
 
@@ -181,6 +183,7 @@ Se il sistema serve a rilevare presenze o a controllare dipendenti, in Italia si
 - **Una persona appena registrata sparisce dopo qualche secondo:** il server ha rifiutato la registrazione perché il nome appartiene già a un'altra persona (ad esempio una persona disattivata). Il motivo è nel log dell'ingest.
 - **La cattura resta ferma su "Immagine sfocata":** il messaggio mostra la nitidezza misurata e quella minima. Migliora la luce, oppure abbassa `MIN_SHARPNESS` in `.env` fino a un valore di poco inferiore a quello misurato.
 - **La richiesta del nome compare troppo presto o troppo tardi:** regola `UNKNOWN_CONFIRM_SECONDS` in `.env`.
+- **Il riquadro resta color ambra con "gira leggermente la testa":** la verifica anti-spoofing non vede abbastanza movimento tra le parti del volto. Avvicinati, migliora la luce e gira lentamente la testa a destra e a sinistra. Se succede spesso anche girando la testa, abbassa `LIVENESS_MIN_PARALLAX` in `.env` (ad esempio da 0.07 a 0.05); se una foto viene accettata, alzalo.
 - **"Bentornato" non compare:** è previsto se la persona è stata vista negli ultimi 10 minuti. Il tempo si regola con `WELCOME_BACK_ABSENCE_SECONDS` in `.env`. La vecchia variabile `GREETING_COOLDOWN_SECONDS` non viene più letta e si può cancellare.
 - **Schermo nero o webcam non trovata:** cambia `CAMERA_INDEX` in `.env` (prova 0, 1, 2...) e riavvia l'app.
 - **FPS bassi:** in `.env` riduci `YOLO_IMAGE_SIZE` a 320, `INSIGHTFACE_DET_SIZE` a 256, oppure `CAMERA_WIDTH` e `CAMERA_HEIGHT` a 640 e 480.
@@ -189,7 +192,7 @@ Se il sistema serve a rilevare presenze o a controllare dipendenti, in Italia si
 
 ## 13. Test della logica
 
-La cartella `tests/` verifica le parti che non dipendono da webcam e modelli: registrazione, soglia di riconoscimento, saluti, apprendimento continuo, configurazione, galleria locale e formato degli eventi MQTT (con il collegamento al server simulato). Usa `unittest`, già incluso in Python. Con `(.venv)` attivo, dalla cartella del progetto:
+La cartella `tests/` verifica le parti che non dipendono da webcam e modelli: registrazione, soglia di riconoscimento, anti-spoofing, saluti, apprendimento continuo, configurazione, galleria locale e formato degli eventi MQTT (con il collegamento al server simulato). Usa `unittest`, già incluso in Python. Con `(.venv)` attivo, dalla cartella del progetto:
 
 ```bash
 python -m unittest
