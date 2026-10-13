@@ -17,7 +17,7 @@ class FakeUI:
     def __init__(self) -> None:
         self.toasts: list[str] = []
 
-    def show_toast(self, text: str, seconds: float | None = None) -> None:
+    def show_toast(self, text: str, seconds: float | None = None, kind: object = None) -> None:
         self.toasts.append(text)
 
 
@@ -74,7 +74,7 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.enroll("Mario")
         self.assertIs(self.state, EnrollmentState.IDLE)
         self.assertEqual([name for name, _, _ in self.db.created], ["Mario"])
-        self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Profilo creato. Benvenuto, Mario!"])
+        self.assertEqual(self.app._ui.toasts, ["Profilo creato. Benvenuto, Mario!"])
 
     def test_registration_starts_with_a_known_person_in_view(self) -> None:
         anna = make_detection(other_person_vector(), match=Match("uid-anna", "Anna", 0.8))
@@ -91,7 +91,7 @@ class EnrollmentFlowTest(unittest.TestCase):
             result.detections[0].match = Match("uid-anna", "Anna", 0.8)
             self.feed(result)
         self.assertIs(self.state, EnrollmentState.IDLE)
-        self.assertEqual(self.app._ui.toasts, ["Nuovo volto rilevato", "Volto gia registrato come Anna"])
+        self.assertEqual(self.app._ui.toasts, ["Volto già registrato come Anna"])
 
     def test_results_older_than_the_save_do_not_restart_the_registration(self) -> None:
         self.enroll("Mario")

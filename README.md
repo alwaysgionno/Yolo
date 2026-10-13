@@ -45,7 +45,7 @@ allenamento riconoscimento facciale AI/
 │   ├── contract.py             # Topic e formato dei messaggi MQTT
 │   ├── new_face_selector.py    # Scelta del volto sconosciuto da registrare (NewFaceSelector)
 │   ├── enrollment.py           # Registrazione dei nuovi volti (EnrollmentSession)
-│   └── ui_controller.py        # Interfaccia OpenCV (UIController)
+│   └── ui_controller.py        # Interfaccia grafica (UIController)
 ├── tests/                      # Test della logica (senza webcam, modelli e server)
 ├── models/                     # Qui va il file yolov8n-face.pt
 ├── .vscode/launch.json         # Configurazione di avvio per VS Code
@@ -148,7 +148,7 @@ Al primo avvio InsightFace scarica il pacchetto di modelli `buffalo_l` (circa 28
 ## 10. Come si usa
 
 - **Persona già registrata:** compare un riquadro verde con nome e similarità. Il saluto "Bentornato, Nome!" compare solo quando la persona rientra nell'inquadratura dopo esserne rimasta fuori per almeno 10 minuti (`WELCOME_BACK_ABSENCE_SECONDS`), contati dall'ultimo istante in cui è stata vista. Chi resta davanti alla webcam non viene salutato di nuovo.
-- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta sconosciuto e abbastanza vicino alla webcam per circa un secondo e mezzo, compare la richiesta di nome e il suo riquadro diventa arancione ("In registrazione"). Con più volti nell'inquadratura viene scelto quello sconosciuto più vicino; le persone già note non bloccano la registrazione. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Al termine compare "Benvenuto, Nome!", una sola volta. Con ESC annulli: il sistema non riproporrà registrazioni per 60 secondi.
+- **Persona nuova:** compare un riquadro rosso "Sconosciuto". Se il volto resta sconosciuto e abbastanza vicino alla webcam per circa un secondo e mezzo, il video si scurisce, al centro compare una finestra per inserire il nome e il suo riquadro diventa color ambra ("In registrazione"). Con più volti nell'inquadratura viene scelto quello sconosciuto più vicino; le persone già note non bloccano la registrazione. Digita il nome e premi INVIO. Poi resta davanti alla webcam: il sistema acquisisce da solo 8 campioni validi, muovendo leggermente la testa e variando un po' la luce. Al termine compare "Benvenuto, Nome!", una sola volta. Con ESC annulli: il sistema non riproporrà registrazioni per 60 secondi.
 - **Durante la cattura** il sistema segue solo il volto che ha fatto comparire la richiesta e ignora gli altri. Il pannello in basso spiega perché un campione viene scartato: volto troppo lontano, immagine sfocata (con il valore misurato e quello minimo), volto non più presente, oppure volto che appartiene a un profilo già registrato.
 - **Richiesta ritirata in automatico:** se il volto in registrazione viene riconosciuto come persona già registrata per due risultati di fila, la registrazione si annulla per non creare un doppione. Se il volto si allontana per 10 secondi prima che sia stato digitato qualcosa, la richiesta di nome si chiude da sola.
 - **Più messaggi insieme:** i messaggi in alto vengono impilati (fino a tre), così un saluto non ne copre un altro.

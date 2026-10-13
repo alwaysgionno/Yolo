@@ -113,7 +113,7 @@ class NameInputTest(EnrollmentTestCase):
         self.session.start(make_detection())
         self.type_name("Mario ROSSI")
         self.assertIs(self.session.state, EnrollmentState.NAME_INPUT)
-        self.assertIn("gia registrato", self.session.error)
+        self.assertIn("già registrato", self.session.error)
 
     def test_name_is_cleaned_and_backspace_works(self) -> None:
         self.session.start(make_detection())
@@ -156,7 +156,7 @@ class FollowedFaceTest(EnrollmentTestCase):
         self.clock.advance(2.0)
         self.session.tick()
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
-        self.assertIn("volto non piu presente", self.session.error)
+        self.assertIn("volto non più presente", self.session.error)
 
         # Nessuno snooze: un volto nuovo puo essere proposto subito
         self.session.reset()
@@ -180,7 +180,7 @@ class FollowedFaceTest(EnrollmentTestCase):
         self.assertIs(self.session.state, EnrollmentState.NAME_INPUT)  # un solo riconoscimento non basta
         self.session.offer_frame([make_detection(match=self.KNOWN)])
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
-        self.assertEqual(self.session.error, "Volto gia registrato come Anna")
+        self.assertEqual(self.session.error, "Volto già registrato come Anna")
 
         self.session.reset()
         self.assertFalse(any(self.session.consider_start([make_detection()]) for _ in range(5)))  # snooze
@@ -225,7 +225,7 @@ class CaptureTest(EnrollmentTestCase):
         cases = [
             ([], "Nessun volto"),
             ([make_detection(other_person_vector())], "Volto diverso"),
-            ([make_detection(match=Match("uid-anna", "Anna", 0.8))], "gia registrato come Anna"),
+            ([make_detection(match=Match("uid-anna", "Anna", 0.8))], "già registrato come Anna"),
             ([make_detection(face_width=50.0)], "Avvicinati"),
             ([make_detection(sharpness=10.0)], "sfocata (10/60)"),
         ]

@@ -20,6 +20,7 @@
 #
 #  ELENCO LIBRERIE E SCOPO
 #   opencv-python 4.10.0.84  -> cattura dalla webcam, finestra video, riquadri e testi a schermo
+#   pillow 12.3.0            -> testi dell'interfaccia con i font TrueType del sistema (lettere accentate comprese)
 #   numpy 1.26.4             -> calcolo numerico: immagini come matrici, vettori biometrici, similarita
 #   ultralytics 8.3.0        -> YOLOv8: rilevamento rapido dei volti nel fotogramma
 #   insightface 0.7.3        -> ArcFace: genera l'embedding biometrico del volto (512 valori)
@@ -36,6 +37,7 @@
 # =============================================================================
 
 opencv-python==4.10.0.84
+pillow==12.3.0
 numpy==1.26.4
 ultralytics==8.3.0
 insightface==0.7.3

@@ -17,7 +17,7 @@ Il sistema è diviso in due repository che comunicano solo via MQTT:
 
 1. **Architettura concorrente.** Cattura webcam, inferenza AI e interfaccia grafica girano in thread distinti. L'AI non deve mai bloccare il video.
 2. **Pipeline di riconoscimento.** YOLOv8 rileva il volto nel fotogramma. Il ritaglio viene passato a InsightFace (ArcFace), che produce un embedding a 512 dimensioni. Il confronto avviene sulla telecamera, con la similarità coseno sugli embedding della galleria locale.
-3. **Nuovi volti.** Se la similarità massima è sotto `RECOGNITION_THRESHOLD` il volto è sconosciuto. Quando lo stesso volto sconosciuto resta nell'inquadratura per più risultati di inferenza consecutivi, un overlay OpenCV chiede il nome. Poi vengono acquisiti da 5 a 10 campioni validi (`ENROLLMENT_SAMPLES`, predefinito 8).
+3. **Nuovi volti.** Se la similarità massima è sotto `RECOGNITION_THRESHOLD` il volto è sconosciuto. Quando lo stesso volto sconosciuto resta nell'inquadratura per più risultati di inferenza consecutivi, una finestra al centro dello schermo chiede il nome. Poi vengono acquisiti da 5 a 10 campioni validi (`ENROLLMENT_SAMPLES`, predefinito 8).
 4. **Apprendimento continuo.** I riconoscimenti con similarità sopra `CONTINUOUS_LEARNING_THRESHOLD` arricchiscono il profilo. Gli embedding vengono mediati a gruppi e inviati al server come nuovi campioni.
 5. **Saluti.** "Benvenuto, Nome!" compare una sola volta, al primo riconoscimento della persona, che di norma coincide con la registrazione. "Bentornato, Nome!" compare solo quando la persona rientra nel campo visivo dopo un'assenza di almeno `WELCOME_BACK_ABSENCE_SECONDS` (predefinito 600), misurata dall'ultimo avvistamento. Ogni saluto viene pubblicato al server, che aggiorna `persons.last_access_at` e scrive una riga in `access_logs`.
 6. **Dati.** La telecamera non salva nulla su disco. Registrazioni, saluti ed embedding di apprendimento continuo vengono pubblicati via MQTT (QoS 1) e salvati dal server in tempo reale.
@@ -25,10 +25,10 @@ Il sistema è diviso in due repository che comunicano solo via MQTT:
 ## 3. Stack tecnologico
 
 - Python 3.11 (3.10 supportato)
-- opencv-python 4.10.0.84, numpy 1.26.4, ultralytics 8.3.0, insightface 0.7.3, onnxruntime 1.19.2, paho-mqtt 2.1.0, python-dotenv 1.0.1
+- opencv-python 4.10.0.84, pillow 12.3.0, numpy 1.26.4, ultralytics 8.3.0, insightface 0.7.3, onnxruntime 1.19.2, paho-mqtt 2.1.0, python-dotenv 1.0.1
 - torch 2.4.1 CPU e torchvision 0.19.1, installati separatamente dall'indice PyTorch
 - Broker MQTT del server (Mosquitto 2.0), raggiunto sulla rete locale
-- Interfaccia interamente OpenCV, senza Tkinter
+- Interfaccia in una finestra OpenCV, senza Tkinter: forme disegnate con OpenCV, testi con Pillow (font TrueType del sistema)
 
 Le versioni sono in `requirements.txt`, con la spiegazione di ogni libreria.
 
@@ -86,7 +86,7 @@ Stati: `IDLE → NAME_INPUT → CAPTURING → COMPLETED | CANCELLED`.
 
 - **Selezione (`NewFaceSelector`):** tra i volti sconosciuti larghi almeno `MIN_FACE_WIDTH_PX` viene scelto il più vicino alla webcam (il più largo). Le persone note presenti nel fotogramma non bloccano la selezione.
 - **Conferma:** il volto scelto deve ricomparire, sempre sconosciuto, per almeno 3 risultati di inferenza consecutivi (`UNKNOWN_CONFIRM_RESULTS`) e per `UNKNOWN_CONFIRM_SECONDS` (predefinito 1.5). Il volto viene riconosciuto tra un risultato e l'altro confrontando gli embedding (`find_same_face`, similarità `≥ 0.50`). Se esce, si allontana, viene riconosciuto o lascia il posto a un'altra persona, il conteggio riparte: un singolo fotogramma mosso o di profilo non fa comparire la richiesta del nome.
-- **Avvio (`consider_start`):** quando il selettore conferma un volto, fuori dal periodo di snooze (`UNKNOWN_SNOOZE_SECONDS`, predefinito 60 secondi dopo un annullamento). La sessione riceve l'embedding del volto e da quel momento segue solo quello (`candidate_in`), ignorando gli altri. Nella UI il suo riquadro è arancione, "In registrazione".
+- **Avvio (`consider_start`):** quando il selettore conferma un volto, fuori dal periodo di snooze (`UNKNOWN_SNOOZE_SECONDS`, predefinito 60 secondi dopo un annullamento). La sessione riceve l'embedding del volto e da quel momento segue solo quello (`candidate_in`), ignorando gli altri. Nella UI il suo riquadro è color ambra, "In registrazione", e il video viene scurito dietro la finestra del nome, che mostra la miniatura del volto, il campo di testo e i tasti disponibili.
 - **Nome:** almeno 2 caratteri, senza duplicati (confronto senza distinzione di maiuscole, sui nomi della galleria comprese le persone disattivate). Timeout di 60 secondi. Se il volto non viene visto per 10 secondi (`CANDIDATE_LOST_TIMEOUT_S`) prima che sia stato digitato un carattere, la richiesta viene ritirata senza snooze.
 - **Volto già registrato (`offer_frame`):** se il volto seguito viene riconosciuto come persona nota in 2 risultati consecutivi (`KNOWN_FACE_CONFIRMATIONS`), la registrazione viene annullata con snooze, sia durante il nome sia durante la cattura. I fotogrammi in cui risulta noto non diventano mai campioni.
 - **Campione valido (`offer_frame`):** il volto seguito, non riconosciuto come persona già registrata, `face_width ≥ MIN_FACE_WIDTH_PX` (90), nitidezza `≥ MIN_SHARPNESS` (60), similarità con il primo campione `≥ 0.50` (stessa persona), similarità con gli altri campioni `≤ 0.985` (varietà), intervallo minimo di 0.4 secondi tra due campioni. Timeout di 30 secondi per la cattura.
@@ -113,7 +113,7 @@ Il server la salva con `source='continuous'`, elimina i campioni più vecchi olt
 
 `RecognitionService.process` identifica prima tutti i volti e solo dopo decide i saluti: un errore a metà fotogramma non consuma saluti che non potrebbero essere mostrati. I saluti viaggiano come oggetti `Greeting(kind, full_name)`; il testo viene composto dalla UI (`_greeting_texts` in `app/main.py`), un messaggio per tipo, al plurale se le persone sono più di una ("Bentornati, Mario e Anna!").
 
-I toast della UI sono in coda (`UIController.show_toast`): fino a 3 messaggi sono visibili impilati, gli altri attendono il loro turno, e ognuno resta a schermo per tutta la sua durata.
+I toast della UI sono in coda (`UIController.show_toast`): fino a 3 messaggi sono visibili impilati, gli altri attendono il loro turno, e ognuno resta a schermo per tutta la sua durata. Ogni messaggio ha un tipo (`ToastKind`): i saluti sono più grandi e verdi, gli annullamenti sono avvisi color ambra.
 
 ## 9. Galleria locale e collegamento MQTT
 
@@ -161,7 +161,7 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 - `app/inference_worker.py`: `InferenceWorker`, thread di inferenza, risultati, coda dei saluti
 - `app/new_face_selector.py`: `NewFaceSelector`, `find_same_face`, scelta e conferma del volto sconosciuto
 - `app/enrollment.py`: `EnrollmentSession`, `EnrollmentState`, registrazione del volto selezionato
-- `app/ui_controller.py`: `UIController`, disegno OpenCV, coda dei toast, pannelli
+- `app/ui_controller.py`: `UIController`, `ToastKind`, disegno dell'interfaccia (OpenCV + Pillow), coda dei toast, finestra del nome, pannelli
 - `app/main.py`: `FaceAccessApp` (composizione, ciclo UI, tasti) e `main()`
 - `tests/`: test `unittest` della logica, con archivio, orologio e volti simulati in `tests/helpers.py`. Si eseguono con `python -m unittest`
 - `.env.example`, `.gitignore`, `requirements.txt`, `README.md`, `.vscode/launch.json`, `models/LEGGIMI.txt`
@@ -171,14 +171,14 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 - PEP 8, type hints ovunque, docstring in italiano, identificatori in inglese.
 - Logging con il modulo `logging`, mai `print`.
 - Errori gestiti con eccezioni dedicate: `ConfigurationError` per la configurazione, `StoreError` per galleria ed eventi, `ContractError` per i messaggi non validi.
-- Testi a schermo in OpenCV senza caratteri accentati, perché il font Hershey non li supporta.
+- Testi a schermo disegnati con Pillow (`_draw_text` in `app/ui_controller.py`), non con `cv2.putText`: le lettere accentate sono supportate. Le misure in pixel dell'interfaccia sono riferite a 1280x720 e passano da `_px`, che le adatta alla risoluzione.
 - Credenziali solo nel file `.env`, mai nel codice.
 
 ## 13. Limiti noti
 
 - Senza pesi `yolov8n-face.pt` si usa il rilevamento di persone: un volto viene trovato solo se YOLO riconosce la persona, e ogni persona in più nel fotogramma allunga l'inferenza (circa 0.2 secondi con una o due persone, 0.7 con sei).
 - Un volto già registrato, visto con similarità sotto soglia (occhiali, angolazione estrema, scarsa luce), viene trattato come sconosciuto. Se resta sotto soglia per tutta la durata della conferma e della cattura, il sistema può ancora proporre e completare una registrazione duplicata; se torna sopra soglia per due risultati consecutivi, la registrazione viene annullata.
-- I nomi si digitano solo con caratteri ASCII: niente lettere accentate, per il limite del font Hershey.
+- I nomi si digitano solo con caratteri ASCII: niente lettere accentate, perché `cv2.waitKey` restituisce solo il codice ASCII del tasto.
 - Il traffico MQTT non è cifrato: password ed embedding viaggiano in chiaro sulla rete locale.
 - Gli eventi in coda vivono solo in memoria: se l'applicazione viene chiusa mentre il server non è raggiungibile vanno persi (alla chiusura attende al massimo 3 secondi). Una persona registrata in quel momento esisterebbe solo nella galleria locale e sparirebbe al riavvio.
 - Finché la galleria non è arrivata dal server non si riconosce e non si registra nessuno: senza server la telecamera non può partire da zero.

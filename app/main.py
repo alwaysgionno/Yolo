@@ -22,14 +22,13 @@ from .inference_worker import InferenceWorker
 from .models import FrameResult, Greeting, GreetingKind
 from .mqtt_link import MqttLink
 from .recognition_service import RecognitionService
-from .ui_controller import NO_KEY, UIController
+from .ui_controller import NO_KEY, ToastKind, UIController
 
 logger = logging.getLogger("face_access")
 
 QUIT_KEYS = (ord("q"), ord("Q"))
 FPS_SMOOTHING = 0.1
 GREETING_TOAST_SECONDS = 4.0
-NOTICE_TOAST_SECONDS = 2.5
 FRAME_WAIT_TIMEOUT_S = 0.05   # attesa massima di un nuovo fotogramma: la UI resta reattiva ai tasti
 RESULT_MAX_AGE_S = 3.0        # un risultato di inferenza piu vecchio non descrive piu la scena
 GREETING_WORDS = {            # tipo di saluto -> (per una persona, per piu persone)
@@ -84,7 +83,7 @@ class FaceAccessApp:
 
             result = self._current_result(camera_connected)
             for text in _greeting_texts(self._worker.drain_greetings()):
-                self._ui.show_toast(text, GREETING_TOAST_SECONDS)
+                self._ui.show_toast(text, GREETING_TOAST_SECONDS, ToastKind.GREETING)
             self._update_enrollment(result)
 
             canvas = self._ui.render(
@@ -140,23 +139,28 @@ class FaceAccessApp:
             if enrollment.is_active:
                 # Si segue il volto in registrazione: durante la cattura fornisce i campioni
                 enrollment.offer_frame(result.detections)
-            elif enrollment.consider_start(result.detections):
-                # Un volto sconosciuto resta inquadrato da qualche istante: si propone la registrazione
-                self._ui.show_toast("Nuovo volto rilevato", NOTICE_TOAST_SECONDS)
+            else:
+                # Se un volto sconosciuto resta inquadrato da qualche istante la sessione passa
+                # alla richiesta del nome, e la UI mostra la finestra per inserirlo
+                enrollment.consider_start(result.detections)
 
         # 2. Scadenze e esiti finali
         enrollment.tick()
         if enrollment.state is EnrollmentState.COMPLETED:
             # Il profilo nasce con l'ultimo accesso gia valorizzato: al primo riconoscimento
             # il servizio non aggiunge un secondo saluto
-            self._ui.show_toast(f"Profilo creato. Benvenuto, {enrollment.name}!", GREETING_TOAST_SECONDS)
+            self._ui.show_toast(
+                f"Profilo creato. Benvenuto, {enrollment.name}!", GREETING_TOAST_SECONDS, ToastKind.GREETING
+            )
             # I risultati calcolati sui fotogrammi precedenti al salvataggio vedono ancora la persona
             # come sconosciuta: vengono ignorati, altrimenti la registrazione ripartirebbe subito
             newest_frame_id, _ = self._camera.latest()
             self._last_enrollment_frame_id = max(self._last_enrollment_frame_id, newest_frame_id)
             enrollment.reset()
         elif enrollment.state is EnrollmentState.CANCELLED:
-            self._ui.show_toast(enrollment.error or "Registrazione annullata", GREETING_TOAST_SECONDS)
+            self._ui.show_toast(
+                enrollment.error or "Registrazione annullata", GREETING_TOAST_SECONDS, ToastKind.WARNING
+            )
             enrollment.reset()
 
     def _shutdown(self) -> None:

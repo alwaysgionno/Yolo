@@ -167,7 +167,7 @@ class EnrollmentSession:
         self._candidate_seen_at = self._clock()
         if candidate.match is not None:
             # Il volto appartiene a un profilo esistente: salvarlo creerebbe un duplicato
-            self.feedback = f"Volto gia registrato come {candidate.match.full_name}"
+            self.feedback = f"Volto già registrato come {candidate.match.full_name}"
             self._known_streak += 1
             if self._known_streak >= KNOWN_FACE_CONFIRMATIONS:
                 self._cancel(self.feedback, snooze=True)
@@ -185,7 +185,7 @@ class EnrollmentSession:
             if elapsed > NAME_INPUT_TIMEOUT_S:
                 self._cancel("Tempo scaduto: nessun nome inserito", snooze=True)
             elif not self.name and now - self._candidate_seen_at > CANDIDATE_LOST_TIMEOUT_S:
-                self._cancel("Registrazione annullata: volto non piu presente", snooze=False)
+                self._cancel("Registrazione annullata: volto non più presente", snooze=False)
         elif self.state is EnrollmentState.CAPTURING and elapsed > CAPTURE_TIMEOUT_S:
             self._cancel("Cattura non completata: riprova", snooze=True)
 
@@ -215,7 +215,7 @@ class EnrollmentSession:
             )
             return
         if self._samples and max(float(np.dot(embedding, prev)) for prev in self._samples) > DUPLICATE_SIMILARITY:
-            self.feedback = "Muovi un po la testa o cambia l'inclinazione"
+            self.feedback = "Muovi un po' la testa o cambia l'inclinazione"
             return
 
         if not self._samples:
@@ -237,7 +237,7 @@ class EnrollmentSession:
             return
         try:
             if self._store.person_exists(name):
-                self.error = "Nome gia registrato"
+                self.error = "Nome già registrato"
                 return
         except StoreError as exc:
             logger.error("Verifica del nome non riuscita: %s", exc)
