@@ -5,3 +5,6 @@ Copia in questa cartella i pesi YOLO per il rilevamento dei volti:
 Se il file manca, al primo avvio l'applicazione scarica qui il modello generico
 yolov8n.pt (rileva le persone) e cerca il volto all'interno del ritaglio.
 Vedi la sezione 8 del README.
+
+Con WAVE_GREETING=1 (saluto con la mano) al primo avvio viene scaricato qui anche
+yolov8n-pose.pt, il modello di posa usato per riconoscere il gesto.

@@ -17,7 +17,9 @@ from .camera_stream import CameraStream
 from .person_store import StoreError
 from .face_processor import FaceProcessor
 from .models import FrameResult, Greeting
+from .pose_estimator import PoseEstimator
 from .recognition_service import RecognitionService
+from .wave_detector import attach_arms
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +36,13 @@ class InferenceWorker(threading.Thread):
         camera: CameraStream,
         processor: FaceProcessor,
         recognizer: RecognitionService,
+        poses: PoseEstimator | None = None,
     ) -> None:
         super().__init__(name="InferenceWorker", daemon=True)
         self._camera = camera
         self._processor = processor
         self._recognizer = recognizer
+        self._poses = poses  # modello di posa per il saluto con la mano; None se disattivato
         self._stop_event = threading.Event()
         self._result_lock = threading.Lock()
         self._latest: FrameResult | None = None
@@ -108,6 +112,8 @@ class InferenceWorker(threading.Thread):
         """Esegue la pipeline completa su un singolo fotogramma."""
         started = time.perf_counter()
         detections = self._processor.process(frame)
+        if self._poses is not None and detections:  # senza volti nessuno puo salutare: si risparmia il modello
+            attach_arms(detections, self._poses.estimate(frame))
 
         gallery_ok = True
         try:

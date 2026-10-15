@@ -18,6 +18,7 @@ from .person_store import PersonStore, StoreError
 from .greeting_policy import GreetingPolicy
 from .liveness import LivenessTracker
 from .models import FaceDetection, Greeting, GreetingKind, Match
+from .wave_detector import WaveDetector
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class RecognitionService:
                 settings.liveness_min_parallax, settings.min_face_width_px, settings.min_sharpness, clock
             )
         self._liveness = liveness
+        # Saluto con la mano (None se disattivato con WAVE_GREETING=0)
+        self._waves = WaveDetector(settings.wave_cooldown_seconds, clock) if settings.wave_greeting else None
 
         # Stato dell'apprendimento continuo. Ogni buffer contiene coppie (embedding, nitidezza).
         self._learning_buffers: dict[str, list[tuple[np.ndarray, float]]] = defaultdict(list)
@@ -76,6 +79,10 @@ class RecognitionService:
             if kind is not None:
                 self._record_access(match, kind)
                 greetings.append(Greeting(kind, match.full_name))
+            if self._waves is not None and self._waves.observe(match.person_id, detection.arms, detection.face_width):
+                # Solo a schermo: il saluto con la mano non e un accesso e non viene inviato al server
+                logger.info("Saluto con la mano: %s", match.full_name)
+                greetings.append(Greeting(GreetingKind.WAVE, match.full_name))
             self._learn_if_confident(detection, match)
         return greetings
 

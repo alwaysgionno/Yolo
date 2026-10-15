@@ -21,6 +21,7 @@ from .gallery import Gallery
 from .inference_worker import InferenceWorker
 from .models import EnrollmentDecision, FrameResult, Greeting, GreetingKind
 from .mqtt_link import MqttLink
+from .pose_estimator import PoseEstimator
 from .recognition_service import RecognitionService
 from .ui_controller import NO_KEY, ToastKind, UIController
 
@@ -35,6 +36,7 @@ RESULT_MAX_AGE_S = 3.0        # un risultato di inferenza piu vecchio non descri
 GREETING_WORDS = {            # tipo di saluto -> (per una persona, per piu persone)
     GreetingKind.WELCOME: ("Benvenuto", "Benvenuti"),
     GreetingKind.WELCOME_BACK: ("Bentornato", "Bentornati"),
+    GreetingKind.WAVE: ("Ciao", "Ciao"),
 }
 
 
@@ -50,7 +52,8 @@ class FaceAccessApp:
         self._camera = CameraStream(settings.camera_index, settings.camera_width, settings.camera_height)
         self._processor = FaceProcessor(settings)
         self._recognizer = RecognitionService(settings, store)
-        self._worker = InferenceWorker(self._camera, self._processor, self._recognizer)
+        poses = PoseEstimator(settings) if settings.wave_greeting else None
+        self._worker = InferenceWorker(self._camera, self._processor, self._recognizer, poses)
         self._enrollment = EnrollmentSession(settings, store)
         self._ui = UIController(settings.camera_width, settings.camera_height)
         self._ui_fps = 0.0
