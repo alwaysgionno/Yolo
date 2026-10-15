@@ -20,6 +20,18 @@ class Match:
     full_name: str
     similarity: float  # tra -1 e 1; 1 significa vettori identici
     last_access_age_s: float | None = None  # secondi dall'ultimo saluto noto; None se mai salutata
+    # True se il volto appartiene a una registrazione in attesa dell'approvazione di un amministratore:
+    # la persona non va salutata ne usata per l'apprendimento continuo
+    pending: bool = False
+
+
+@dataclass(frozen=True)
+class EnrollmentDecision:
+    """Esito di una richiesta di registrazione inviata da questa telecamera, deciso sul server."""
+
+    person_id: str
+    full_name: str  # nome definitivo: l'amministratore puo averlo corretto
+    approved: bool
 
 
 class GreetingKind(Enum):
@@ -50,6 +62,7 @@ class FaceDetection:
     patch: np.ndarray | None = None      # volto allineato in scala di grigi, per la verifica anti-spoofing
     live: bool | None = None             # esito della verifica anti-spoofing; None se non e stata eseguita
     liveness_wait_s: float = 0.0         # da quanti secondi il volto attende di essere verificato
+    photo: np.ndarray | None = None      # ritaglio a colori del volto (BGR), inviato con la richiesta di registrazione
 
 
 @dataclass

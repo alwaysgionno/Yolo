@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import unittest
 import uuid
 from typing import Any
@@ -59,8 +60,9 @@ class EventsTest(PersonStoreTestCase):
         super().setUp()
         self.receive_gallery()
 
-    def test_enrollment_is_published_and_known_at_once(self) -> None:
-        person_uid = self.store.create_person("Mario", [face_vector(1), face_vector(2)], [90.0, 95.0])
+    def test_enrollment_request_is_published_and_waits_for_approval(self) -> None:
+        photo = np.full((320, 320, 3), 128, dtype=np.uint8)
+        person_uid = self.store.create_person("Mario", [face_vector(1), face_vector(2)], [90.0, 95.0], photo)
 
         (topic, event), = self.link.events
         self.assertEqual(topic, contract.TOPIC_EVENT_ENROLLED)
@@ -72,10 +74,18 @@ class EventsTest(PersonStoreTestCase):
         self.assertEqual([sample["quality"] for sample in event["samples"]], [90.0, 95.0])
         np.testing.assert_array_equal(contract.decode_embedding(event["samples"][1]["embedding"]), face_vector(2))
 
+        jpeg = base64.b64decode(event["photo"])
+        self.assertTrue(jpeg.startswith(b"\xff\xd8\xff"))
+        self.assertLessEqual(len(jpeg), contract.MAX_PHOTO_BYTES)
+
+        # In attesa: il nome e riservato, ma il volto non viene riconosciuto
         self.assertTrue(self.store.person_exists("mario"))
-        match = self.store.find_nearest(face_vector(1), 5)[0]
-        self.assertEqual(match.person_id, person_uid)
-        self.assertEqual(match.last_access_age_s, 0.0)
+        self.assertEqual(self.store.find_nearest(face_vector(1), 5), [])
+        self.assertEqual(self.store.find_pending(face_vector(1)).person_id, person_uid)
+
+    def test_enrollment_without_photo_has_no_photo_field(self) -> None:
+        self.store.create_person("Mario", [face_vector(1)], [90.0])
+        self.assertNotIn("photo", self.link.events[0][1])
 
     def test_enrollment_needs_one_quality_per_embedding(self) -> None:
         with self.assertRaises(ValueError):
@@ -90,7 +100,14 @@ class EventsTest(PersonStoreTestCase):
         self.assertFalse(self.store.person_exists("Mario"))
 
     def test_greeting_is_published_and_updates_the_last_access(self) -> None:
-        person_uid = self.store.create_person("Mario", [face_vector(1)], [90.0])
+        person_uid = "11111111-1111-1111-1111-111111111111"
+        self.gallery.apply_person_message(
+            person_uid,
+            contract.encode_json({
+                "full_name": "Mario", "last_access_at": NOW_ISO,
+                "embeddings": [contract.encode_embedding(face_vector(1))],
+            }),
+        )
         self.clock.advance(700.0)
         self.assertEqual(self.store.find_nearest(face_vector(1), 1)[0].last_access_age_s, 700.0)
 

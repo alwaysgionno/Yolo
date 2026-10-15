@@ -8,8 +8,8 @@ from __future__ import annotations
 import unittest
 
 from app.enrollment import ENTER_KEYS, EnrollmentSession, EnrollmentState
-from app.main import FaceAccessApp, _greeting_texts
-from app.models import FrameResult, Greeting, GreetingKind, Match
+from app.main import FaceAccessApp, _decision_toast, _greeting_texts
+from app.models import EnrollmentDecision, FrameResult, Greeting, GreetingKind, Match
 from tests.helpers import FakeClock, FakeStore, face_vector, make_detection, make_settings, other_person_vector
 
 
@@ -74,7 +74,24 @@ class EnrollmentFlowTest(unittest.TestCase):
         self.enroll("Mario")
         self.assertIs(self.state, EnrollmentState.IDLE)
         self.assertEqual([name for name, _, _ in self.db.created], ["Mario"])
-        self.assertEqual(self.app._ui.toasts, ["Profilo creato. Benvenuto, Mario!"])
+        self.assertEqual(self.app._ui.toasts, ["Richiesta inviata, Mario: attendi l'approvazione"])
+
+    def test_decisions_of_the_server_have_their_own_message(self) -> None:
+        self.assertEqual(
+            _decision_toast(EnrollmentDecision("uid-1", "Mario Rossi", approved=True))[0],
+            "Registrazione approvata. Benvenuto, Mario Rossi!",
+        )
+        self.assertEqual(
+            _decision_toast(EnrollmentDecision("uid-1", "Mario", approved=False))[0],
+            "Registrazione di Mario non approvata",
+        )
+
+    def test_face_waiting_for_approval_is_not_proposed_again(self) -> None:
+        for _ in range(6):
+            result = self.unknown_result()
+            result.detections[0].match = Match("uid-1", "Mario", 0.9, pending=True)
+            self.feed(result)
+        self.assertIs(self.state, EnrollmentState.IDLE)
 
     def test_registration_starts_with_a_known_person_in_view(self) -> None:
         anna = make_detection(other_person_vector(), match=Match("uid-anna", "Anna", 0.8))

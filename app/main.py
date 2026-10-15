@@ -19,7 +19,7 @@ from .enrollment import EnrollmentSession, EnrollmentState
 from .face_processor import FaceProcessor
 from .gallery import Gallery
 from .inference_worker import InferenceWorker
-from .models import FrameResult, Greeting, GreetingKind
+from .models import EnrollmentDecision, FrameResult, Greeting, GreetingKind
 from .mqtt_link import MqttLink
 from .recognition_service import RecognitionService
 from .ui_controller import NO_KEY, ToastKind, UIController
@@ -29,6 +29,7 @@ logger = logging.getLogger("face_access")
 QUIT_KEYS = (ord("q"), ord("Q"))
 FPS_SMOOTHING = 0.1
 GREETING_TOAST_SECONDS = 4.0
+DECISION_TOAST_SECONDS = 6.0
 FRAME_WAIT_TIMEOUT_S = 0.05   # attesa massima di un nuovo fotogramma: la UI resta reattiva ai tasti
 RESULT_MAX_AGE_S = 3.0        # un risultato di inferenza piu vecchio non descrive piu la scena
 GREETING_WORDS = {            # tipo di saluto -> (per una persona, per piu persone)
@@ -43,6 +44,7 @@ class FaceAccessApp:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         gallery = Gallery()
+        self._gallery = gallery
         self._link = MqttLink(settings, gallery)
         store = PersonStore(gallery, self._link)
         self._camera = CameraStream(settings.camera_index, settings.camera_width, settings.camera_height)
@@ -84,6 +86,8 @@ class FaceAccessApp:
             result = self._current_result(camera_connected)
             for text in _greeting_texts(self._worker.drain_greetings()):
                 self._ui.show_toast(text, GREETING_TOAST_SECONDS, ToastKind.GREETING)
+            for decision in self._gallery.drain_decisions():
+                self._ui.show_toast(*_decision_toast(decision))
             self._update_enrollment(result)
 
             canvas = self._ui.render(
@@ -147,12 +151,13 @@ class FaceAccessApp:
         # 2. Scadenze e esiti finali
         enrollment.tick()
         if enrollment.state is EnrollmentState.COMPLETED:
-            # Il profilo nasce con l'ultimo accesso gia valorizzato: al primo riconoscimento
-            # il servizio non aggiunge un secondo saluto
+            # La persona non e ancora registrata: un amministratore deve approvare la richiesta
             self._ui.show_toast(
-                f"Profilo creato. Benvenuto, {enrollment.name}!", GREETING_TOAST_SECONDS, ToastKind.GREETING
+                f"Richiesta inviata, {enrollment.name}: attendi l'approvazione",
+                DECISION_TOAST_SECONDS,
+                ToastKind.INFO,
             )
-            # I risultati calcolati sui fotogrammi precedenti al salvataggio vedono ancora la persona
+            # I risultati calcolati sui fotogrammi precedenti all'invio vedono ancora la persona
             # come sconosciuta: vengono ignorati, altrimenti la registrazione ripartirebbe subito
             newest_frame_id, _ = self._camera.latest()
             self._last_enrollment_frame_id = max(self._last_enrollment_frame_id, newest_frame_id)
@@ -171,6 +176,13 @@ class FaceAccessApp:
         self._ui.destroy()
         self._link.close()
         logger.info("Applicazione chiusa")
+
+
+def _decision_toast(decision: EnrollmentDecision) -> tuple[str, float, ToastKind]:
+    """Messaggio a schermo per l'esito di una richiesta di registrazione."""
+    if decision.approved:
+        return f"Registrazione approvata. Benvenuto, {decision.full_name}!", DECISION_TOAST_SECONDS, ToastKind.GREETING
+    return f"Registrazione di {decision.full_name} non approvata", DECISION_TOAST_SECONDS, ToastKind.WARNING
 
 
 def _greeting_texts(greetings: list[Greeting]) -> list[str]:

@@ -9,6 +9,7 @@ import numpy as np
 from app import contract
 from app.contract import ContractError
 from app.gallery import Gallery
+from app.models import EnrollmentDecision
 from tests.helpers import FakeClock, face_vector, other_person_vector
 
 MARIO, ANNA, CARLA = "uid-mario", "uid-anna", "uid-carla"
@@ -102,12 +103,15 @@ class UpdateTest(GalleryTestCase):
                     self.gallery.apply_person_message(MARIO, payload)
         self.assertEqual(len(self.gallery.find_nearest(face_vector(1), 5)), 1)
 
-    def test_person_added_locally_is_recognized_at_once(self) -> None:
-        self.gallery.add_local(CARLA, "Carla", [face_vector(1), face_vector(2)])
-        match = self.gallery.find_nearest(face_vector(1), 1)[0]
-        self.assertEqual((match.person_id, match.full_name), (CARLA, "Carla"))
-        self.assertEqual(match.last_access_age_s, 0.0)  # la registrazione vale come primo accesso
+    def test_pending_person_is_not_recognized_but_reserves_the_name(self) -> None:
+        self.gallery.add_pending(CARLA, "Carla", [face_vector(1), face_vector(2)])
+        self.assertEqual(self.gallery.find_nearest(face_vector(1), 5), [])
+        pending = self.gallery.find_pending(face_vector(1))
+        self.assertEqual((pending.person_id, pending.full_name, pending.pending), (CARLA, "Carla", True))
+        self.assertGreater(pending.similarity, 0.9)
         self.assertTrue(self.gallery.name_exists("carla"))
+        self.assertEqual(self.gallery.pending_count, 1)
+        self.assertEqual(self.gallery.drain_decisions(), [])
 
 
 class SyncTest(GalleryTestCase):
@@ -136,21 +140,40 @@ class SyncTest(GalleryTestCase):
         self.assertEqual(len(self.gallery), 1)
         self.assertEqual(self.gallery.find_nearest(face_vector(1), 5)[0].person_id, ANNA)
 
-    def test_list_keeps_a_local_person_until_the_server_answers(self) -> None:
+    def test_list_keeps_a_pending_person_until_the_server_decides(self) -> None:
         self.gallery.apply_info_message(info_message())
-        self.gallery.add_local(CARLA, "Carla", [face_vector(1)])
-        self.gallery.apply_info_message(info_message())  # elenco pubblicato prima che il server la salvasse
+        self.gallery.add_pending(CARLA, "Carla", [face_vector(1)])
+        self.gallery.apply_info_message(info_message())  # le richieste in attesa non sono nell'elenco
         self.assertTrue(self.gallery.name_exists("Carla"))
+        self.assertIsNotNone(self.gallery.find_pending(face_vector(1)))
 
-        # Il server conferma: da qui in poi vale il suo elenco
-        self.gallery.apply_person_message(CARLA, person_message("Carla", [face_vector(1)]))
+    def test_approval_moves_the_person_into_the_gallery_with_the_final_name(self) -> None:
         self.gallery.apply_info_message(info_message())
+        self.gallery.add_pending(CARLA, "Carla", [face_vector(1)])
+        # L'amministratore ha corretto il nome prima di approvare
+        self.gallery.apply_person_message(CARLA, person_message("Carla Bianchi", [face_vector(1)], "2026-10-15T09:00:00+00:00"))
+        self.assertEqual(self.gallery.drain_decisions(), [EnrollmentDecision(CARLA, "Carla Bianchi", approved=True)])
+        self.assertEqual(self.gallery.drain_decisions(), [])  # ogni esito si legge una volta sola
+        self.assertIsNone(self.gallery.find_pending(face_vector(1)))
+        self.assertEqual(self.gallery.find_nearest(face_vector(1), 1)[0].full_name, "Carla Bianchi")
         self.assertFalse(self.gallery.name_exists("Carla"))
 
-    def test_server_can_reject_a_local_person(self) -> None:
-        self.gallery.add_local(CARLA, "Carla", [face_vector(1)])
+        # Da qui in poi vale l'elenco del server
+        self.gallery.apply_info_message(info_message())
+        self.assertFalse(self.gallery.name_exists("Carla Bianchi"))
+
+    def test_rejection_forgets_the_pending_person(self) -> None:
+        self.gallery.add_pending(CARLA, "Carla", [face_vector(1)])
         self.gallery.apply_person_message(CARLA, b"")
+        self.assertEqual(self.gallery.drain_decisions(), [EnrollmentDecision(CARLA, "Carla", approved=False)])
+        self.assertIsNone(self.gallery.find_pending(face_vector(1)))
         self.assertEqual(self.gallery.find_nearest(face_vector(1), 5), [])
+        self.assertFalse(self.gallery.name_exists("Carla"))
+
+    def test_updates_of_other_persons_are_not_decisions(self) -> None:
+        self.gallery.apply_person_message(MARIO, person_message("Mario", [face_vector(1)]))
+        self.gallery.apply_person_message(MARIO, b"")
+        self.assertEqual(self.gallery.drain_decisions(), [])
 
     def test_invalid_list_is_refused(self) -> None:
         for payload in (b"[]", contract.encode_json({"person_uids": "tutti"}), contract.encode_json({})):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
+
 from app.enrollment import ENTER_KEYS, ESC_KEY, EnrollmentSession, EnrollmentState
 from app.models import Match
 from tests.helpers import FakeClock, FakeStore, face_vector, make_detection, make_settings, other_person_vector
@@ -219,6 +221,24 @@ class CaptureTest(EnrollmentTestCase):
         self.assertEqual(name, "Mario Rossi")
         self.assertEqual(len(embeddings), 5)
         self.assertEqual(len(qualities), 5)
+        self.assertEqual(self.db.photos, [None])  # i volti di prova non hanno foto
+
+    def test_photo_of_the_sharpest_sample_goes_with_the_request(self) -> None:
+        self.begin_capture()
+        photos = {}
+        for axis, sharpness in zip(range(1, 6), (80.0, 200.0, 90.0, 150.0, 100.0)):
+            photos[sharpness] = np.full((4, 4, 3), axis, dtype=np.uint8)
+            self.session.offer_frame([make_detection(face_vector(axis), sharpness=sharpness, photo=photos[sharpness])])
+            self.clock.advance(0.5)
+        self.assertIs(self.session.state, EnrollmentState.COMPLETED)
+        self.assertIs(self.db.photos[0], photos[200.0])
+
+    def test_face_waiting_for_approval_cancels_with_its_own_message(self) -> None:
+        self.begin_capture()
+        for _ in range(2):
+            self.session.offer_frame([make_detection(match=Match("uid-1", "Mario", 0.9, pending=True))])
+        self.assertIs(self.session.state, EnrollmentState.CANCELLED)
+        self.assertEqual(self.session.error, "Volto già in attesa di approvazione come Mario")
 
     def test_unusable_frames_are_refused_with_a_hint(self) -> None:
         self.begin_capture()
@@ -288,7 +308,7 @@ class CaptureTest(EnrollmentTestCase):
         self.begin_capture()
         self.offer_valid_samples(5)
         self.assertIs(self.session.state, EnrollmentState.CANCELLED)
-        self.assertIn("Invio del profilo", self.session.error)
+        self.assertIn("Invio della richiesta", self.session.error)
         self.assertIsNone(self.session.person_id)
 
 

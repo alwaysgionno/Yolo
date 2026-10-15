@@ -5,10 +5,17 @@ per ogni persona (`gallery/{uid}`) e l'elenco degli uid validi (`gallery_info`):
 telecamera li riceve alla connessione e a ogni modifica. Il confronto coseno avviene qui,
 quindi il riconoscimento continua anche quando il server non e raggiungibile.
 
+Una registrazione fatta da questa telecamera e solo una richiesta: la persona entra nella
+galleria quando un amministratore la approva dal server. Fino ad allora resta tra le persone
+"in attesa", che non vengono riconosciute (niente saluti) ma servono a non riproporre la
+registrazione dello stesso volto e a riservarne il nome. L'esito arriva dal server: la voce
+`gallery/{uid}` (approvata) oppure un messaggio vuoto sullo stesso topic (rifiutata).
+
 La galleria vive solo in memoria: alla chiusura dell'applicazione non resta nulla su disco.
 
-Thread: i messaggi arrivano dal thread di rete MQTT, `find_nearest` viene chiamato dal
-thread di inferenza, `add_local` e `name_exists` dal thread della UI.
+Thread: i messaggi arrivano dal thread di rete MQTT, `find_nearest` e `find_pending` vengono
+chiamati dal thread di inferenza, `add_pending`, `name_exists` e `drain_decisions` dal thread
+della UI.
 """
 
 from __future__ import annotations
@@ -23,9 +30,11 @@ import numpy as np
 
 from . import contract
 from .contract import EMBEDDING_DIMENSION, ContractError
-from .models import Match
+from .models import EnrollmentDecision, Match
 
 logger = logging.getLogger(__name__)
+
+_Index = tuple[np.ndarray, list["_Person"]]
 
 
 @dataclass
@@ -37,19 +46,21 @@ class _Person:
 
 
 class Gallery:
-    """Persone registrate e ricerca del volto piu simile."""
+    """Persone registrate, richieste in attesa e ricerca del volto piu simile."""
 
     def __init__(self, wall_clock: Callable[[], float] = time.time) -> None:
         self._wall_clock = wall_clock
         self._lock = threading.Lock()
         self._persons: dict[str, _Person] = {}
-        # Persone registrate qui e non ancora confermate dal server: l'elenco del server non le rimuove
-        self._pending: set[str] = set()
+        # Registrazioni inviate da qui e non ancora decise dal server: non vengono riconosciute
+        self._pending: dict[str, _Person] = {}
+        self._decisions: list[EnrollmentDecision] = []  # esiti da mostrare, letti dalla UI
         self._expected: frozenset[str] | None = None  # uid annunciati dal server
         self._ready = False
         # Matrice di tutti gli embedding e, riga per riga, la persona a cui appartengono.
         # Viene sostituita per intero a ogni modifica: chi cerca legge sempre una coppia coerente.
-        self._index: tuple[np.ndarray, list[_Person]] = (_empty_matrix(), [])
+        self._index: _Index = (_empty_matrix(), [])
+        self._pending_index: _Index = (_empty_matrix(), [])
 
     @property
     def ready(self) -> bool:
@@ -60,18 +71,31 @@ class Gallery:
         with self._lock:
             return len(self._persons)
 
+    @property
+    def pending_count(self) -> int:
+        """Registrazioni in attesa di approvazione."""
+        with self._lock:
+            return len(self._pending)
+
     def apply_person_message(self, person_uid: str, payload: bytes) -> None:
         """Applica un messaggio `gallery/{uid}`: aggiorna la persona, oppure la rimuove se e vuoto.
+
+        Per una registrazione in attesa il messaggio e l'esito: la voce significa approvata,
+        il messaggio vuoto rifiutata.
 
         Raises:
             ContractError: se il messaggio non rispetta il contratto (la galleria non cambia).
         """
         if not payload:
             with self._lock:
-                self._pending.discard(person_uid)
+                rejected = self._pending.pop(person_uid, None)
+                if rejected is not None:
+                    self._decisions.append(EnrollmentDecision(person_uid, rejected.full_name, approved=False))
+                    logger.info("Registrazione non approvata: %s (uid=%s)", rejected.full_name, person_uid)
+                    self._pending_index = _build_index(self._pending)
                 if self._persons.pop(person_uid, None) is not None:
                     logger.info("Persona rimossa dalla galleria (uid=%s)", person_uid)
-                    self._rebuild()
+                    self._index = _build_index(self._persons)
             return
 
         data = contract.decode_json(payload)
@@ -88,12 +112,17 @@ class Gallery:
         )
         with self._lock:
             self._persons[person_uid] = person
-            self._pending.discard(person_uid)
-            self._rebuild()
+            if self._pending.pop(person_uid, None) is not None:
+                self._decisions.append(EnrollmentDecision(person_uid, full_name, approved=True))
+                logger.info("Registrazione approvata: %s (uid=%s)", full_name, person_uid)
+                self._pending_index = _build_index(self._pending)
+            self._index = _build_index(self._persons)
             self._update_ready()
 
     def apply_info_message(self, payload: bytes) -> None:
         """Applica `gallery_info`: l'elenco degli uid validi. Chi non vi compare viene rimosso.
+
+        Le registrazioni in attesa non sono nell'elenco e restano: l'esito arriva per ciascuna.
 
         Raises:
             ContractError: se il messaggio non rispetta il contratto (la galleria non cambia).
@@ -103,21 +132,26 @@ class Gallery:
             raise ContractError("gallery_info: atteso l'elenco person_uids")
         with self._lock:
             self._expected = frozenset(person_uids)
-            removed = [uid for uid in self._persons if uid not in self._expected and uid not in self._pending]
+            removed = [uid for uid in self._persons if uid not in self._expected]
             for uid in removed:
                 del self._persons[uid]
             if removed:
                 logger.info("Persone non piu presenti sul server rimosse dalla galleria: %d", len(removed))
-                self._rebuild()
+                self._index = _build_index(self._persons)
             self._update_ready()
 
-    def add_local(self, person_uid: str, full_name: str, embeddings: Sequence[np.ndarray]) -> None:
-        """Aggiunge una persona appena registrata, senza attendere la conferma del server."""
-        person = _Person(person_uid, full_name, self._wall_clock(), _normalized_rows(embeddings))
+    def add_pending(self, person_uid: str, full_name: str, embeddings: Sequence[np.ndarray]) -> None:
+        """Ricorda una registrazione appena inviata al server, in attesa di approvazione."""
+        person = _Person(person_uid, full_name, None, _normalized_rows(embeddings))
         with self._lock:
-            self._persons[person_uid] = person
-            self._pending.add(person_uid)
-            self._rebuild()
+            self._pending[person_uid] = person
+            self._pending_index = _build_index(self._pending)
+
+    def drain_decisions(self) -> list[EnrollmentDecision]:
+        """Restituisce e dimentica gli esiti delle registrazioni arrivati dall'ultima chiamata."""
+        with self._lock:
+            decisions, self._decisions = self._decisions, []
+        return decisions
 
     def mark_greeted(self, person_uid: str) -> None:
         """Registra l'istante dell'ultimo saluto, come fara il server quando ricevera l'evento."""
@@ -127,24 +161,24 @@ class Gallery:
                 person.last_access = self._wall_clock()
 
     def name_exists(self, full_name: str) -> bool:
-        """Verifica se esiste gia una persona con lo stesso nome (senza distinguere maiuscole)."""
+        """Verifica se il nome e gia usato da una persona o da una richiesta in attesa (senza distinguere maiuscole)."""
         wanted = full_name.lower()
         with self._lock:
-            return any(person.full_name.lower() == wanted for person in self._persons.values())
+            return any(
+                person.full_name.lower() == wanted
+                for person in (*self._persons.values(), *self._pending.values())
+            )
 
     def find_nearest(self, embedding: np.ndarray, limit: int) -> list[Match]:
         """Restituisce le `limit` corrispondenze piu vicine, ordinate per similarita coseno decrescente.
 
-        Ogni corrispondenza riporta anche i secondi trascorsi dall'ultimo saluto della persona
-        (None se non e mai stata salutata).
+        Considera solo le persone approvate. Ogni corrispondenza riporta anche i secondi trascorsi
+        dall'ultimo saluto della persona (None se non e mai stata salutata).
         """
         matrix, owners = self._index
-        if not owners:
+        similarities = _similarities(matrix, owners, embedding)
+        if similarities is None:
             return []
-        norm = float(np.linalg.norm(embedding))
-        if norm == 0.0:
-            return []
-        similarities = matrix @ (embedding.astype(np.float32) / norm)
         now = self._wall_clock()
         matches = []
         for row in np.argsort(-similarities)[:limit]:
@@ -160,21 +194,41 @@ class Gallery:
             )
         return matches
 
-    def _rebuild(self) -> None:
-        """Ricostruisce la matrice di ricerca. Va chiamato con il lock acquisito."""
-        owners: list[_Person] = []
-        blocks: list[np.ndarray] = []
-        for person in self._persons.values():
-            if len(person.embeddings):
-                blocks.append(person.embeddings)
-                owners.extend([person] * len(person.embeddings))
-        self._index = (np.concatenate(blocks) if blocks else _empty_matrix(), owners)
+    def find_pending(self, embedding: np.ndarray) -> Match | None:
+        """Restituisce la registrazione in attesa piu simile al volto (`Match.pending` vero), se ce n'e una."""
+        matrix, owners = self._pending_index
+        similarities = _similarities(matrix, owners, embedding)
+        if similarities is None:
+            return None
+        row = int(np.argmax(similarities))
+        return Match(owners[row].uid, owners[row].full_name, float(similarities[row]), pending=True)
 
     def _update_ready(self) -> None:
         """La galleria e pronta quando sono arrivate tutte le persone annunciate dal server."""
         if not self._ready and self._expected is not None and self._expected <= self._persons.keys():
             self._ready = True
             logger.info("Galleria ricevuta dal server: %d persone", len(self._persons))
+
+
+def _build_index(persons: dict[str, _Person]) -> _Index:
+    """Matrice di ricerca delle persone indicate. Va chiamato con il lock acquisito."""
+    owners: list[_Person] = []
+    blocks: list[np.ndarray] = []
+    for person in persons.values():
+        if len(person.embeddings):
+            blocks.append(person.embeddings)
+            owners.extend([person] * len(person.embeddings))
+    return (np.concatenate(blocks) if blocks else _empty_matrix(), owners)
+
+
+def _similarities(matrix: np.ndarray, owners: list[_Person], embedding: np.ndarray) -> np.ndarray | None:
+    """Similarita coseno del volto con ogni riga della matrice; None se non c'e nulla da confrontare."""
+    if not owners:
+        return None
+    norm = float(np.linalg.norm(embedding))
+    if norm == 0.0:
+        return None
+    return matrix @ (embedding.astype(np.float32) / norm)
 
 
 def _empty_matrix() -> np.ndarray:

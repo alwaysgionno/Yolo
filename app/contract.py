@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import cv2
 import numpy as np
 
 TOPIC_ROOT = "faceaccess/v1"
@@ -30,10 +31,26 @@ TOPIC_SERVER_STATUS = f"{TOPIC_ROOT}/server/status"
 
 EMBEDDING_DIMENSION = 512
 _EMBEDDING_DTYPE = np.dtype("<f4")  # float32 little-endian
+MAX_PHOTO_BYTES = 256 * 1024        # foto della richiesta di registrazione, prima della codifica base64
+PHOTO_JPEG_QUALITIES = (90, 80, 70, 60, 50)
 
 
 class ContractError(ValueError):
     """Messaggio che non rispetta il contratto."""
+
+
+def encode_photo(image: np.ndarray) -> str | None:
+    """Codifica il ritaglio del volto (BGR) come base64 di un JPEG entro `MAX_PHOTO_BYTES`.
+
+    Restituisce None se l'immagine non si puo codificare: la richiesta parte senza foto.
+    """
+    for quality in PHOTO_JPEG_QUALITIES:
+        ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            return None
+        if len(encoded) <= MAX_PHOTO_BYTES:
+            return base64.b64encode(encoded.tobytes()).decode("ascii")
+    return None
 
 
 def encode_embedding(vector: np.ndarray) -> str:

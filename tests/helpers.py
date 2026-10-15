@@ -88,11 +88,13 @@ def make_detection(
     match: Match | None = None,
     live: bool | None = None,
     patch: np.ndarray | None = None,
+    photo: np.ndarray | None = None,
 ) -> FaceDetection:
     """Volto rilevato con qualita sufficiente, salvo diversa indicazione."""
     return FaceDetection(
         live=live,
         patch=patch,
+        photo=photo,
         bbox=(100, 100, 250, 250),
         detector_confidence=0.9,
         embedding=face_vector(1) if embedding is None else embedding,
@@ -110,6 +112,8 @@ class FakeStore:
         self.existing_names: set[str] = set()
         self.nearest: list[Match] = []   # risposta di find_nearest
         self.created: list[tuple[str, list[np.ndarray], list[float]]] = []
+        self.photos: list[np.ndarray | None] = []  # foto inviata con ogni richiesta di registrazione
+        self.pending: Match | None = None          # risposta di find_pending
         self.greetings: list[tuple[str, float]] = []
         self.continuous: list[tuple[str, np.ndarray, float]] = []
 
@@ -121,15 +125,25 @@ class FakeStore:
         self._check("person_exists")
         return full_name.lower() in self.existing_names
 
-    def create_person(self, full_name: str, embeddings: Sequence[np.ndarray], qualities: Sequence[float]) -> str:
+    def create_person(
+        self,
+        full_name: str,
+        embeddings: Sequence[np.ndarray],
+        qualities: Sequence[float],
+        photo: np.ndarray | None = None,
+    ) -> str:
         self._check("create_person")
         self.created.append((full_name, list(embeddings), list(qualities)))
+        self.photos.append(photo)
         self.existing_names.add(full_name.lower())
         return f"uid-{len(self.created)}"
 
     def find_nearest(self, embedding: np.ndarray, limit: int) -> list[Match]:
         self._check("find_nearest")
         return list(self.nearest[:limit])
+
+    def find_pending(self, embedding: np.ndarray) -> Match | None:
+        return self.pending
 
     def record_greeting(self, person_id: str, similarity: float) -> None:
         self._check("record_greeting")

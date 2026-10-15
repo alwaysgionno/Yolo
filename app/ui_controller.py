@@ -381,12 +381,18 @@ def _draw_detection(
     Una persona riconosciuta ma non ancora verificata dall'anti-spoofing e mostrata in ambra:
     dopo qualche istante compare l'invito a girare la testa.
     Il volto seguito dalla registrazione in corso (`enrolling`) e mostrato in ambra.
+    Una registrazione inviata e non ancora approvata dal server e mostrata in grigio, con il nome.
     Se la galleria non e ancora arrivata dal server (`verified` False) il volto non e stato confrontato:
     viene mostrato in grigio, senza indicarlo come sconosciuto.
     """
     x1, y1, x2, y2 = detection.bbox
     detail = ""
-    if detection.match is not None and detection.live is False:
+    if detection.match is not None and detection.match.pending:
+        # Registrazione inviata ma non ancora approvata: la persona non viene salutata
+        color = COLOR_UNVERIFIED
+        label = detection.match.full_name
+        detail = "in attesa di approvazione"
+    elif detection.match is not None and detection.live is False:
         color = COLOR_WARNING
         label = detection.match.full_name
         waiting = detection.liveness_wait_s < LIVENESS_PROMPT_S

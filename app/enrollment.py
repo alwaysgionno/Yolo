@@ -4,7 +4,10 @@ Flusso (macchina a stati gestita dal thread della UI):
 
     IDLE -> NAME_INPUT (l'utente digita il nome)
          -> CAPTURING (acquisizione di 5-10 campioni validi e verifica anti-spoofing)
-         -> COMPLETED (profilo inviato al server)   oppure   CANCELLED (annullato o scaduto)
+         -> COMPLETED (richiesta inviata al server)   oppure   CANCELLED (annullato o scaduto)
+
+Il server non crea subito la persona: la richiesta, con la foto del volto, attende
+l'approvazione di un amministratore. Fino ad allora la persona non viene riconosciuta.
 
 Il profilo viene salvato solo se il volto e stato verificato come tridimensionale (vedi
 `app/liveness.py`): una foto mostrata alla webcam non puo essere registrata.
@@ -76,6 +79,8 @@ class EnrollmentSession:
 
         self._samples: list[np.ndarray] = []
         self._qualities: list[float] = []
+        self._photo: np.ndarray | None = None  # ritaglio del campione piu nitido, per chi approva
+        self._photo_sharpness = float("-inf")
         self._reference: np.ndarray | None = None  # embedding del volto in registrazione
         self._known_streak = 0
         self._live = False  # True da quando il volto in registrazione ha superato la verifica anti-spoofing
@@ -172,7 +177,10 @@ class EnrollmentSession:
         self._candidate_seen_at = self._clock()
         if candidate.match is not None:
             # Il volto appartiene a un profilo esistente: salvarlo creerebbe un duplicato
-            self.feedback = f"Volto già registrato come {candidate.match.full_name}"
+            if candidate.match.pending:
+                self.feedback = f"Volto già in attesa di approvazione come {candidate.match.full_name}"
+            else:
+                self.feedback = f"Volto già registrato come {candidate.match.full_name}"
             self._known_streak += 1
             if self._known_streak >= KNOWN_FACE_CONFIRMATIONS:
                 self._cancel(self.feedback, snooze=True)
@@ -234,6 +242,8 @@ class EnrollmentSession:
             self._reference = embedding  # il primo campione valido diventa il riferimento dell'identita
         self._samples.append(embedding)
         self._qualities.append(detection.sharpness)
+        if detection.photo is not None and detection.sharpness > self._photo_sharpness:
+            self._photo, self._photo_sharpness = detection.photo, detection.sharpness
         self._last_sample_at = self._clock()
         self.feedback = "Campione acquisito"
         logger.info("Campione di registrazione %d/%d acquisito", len(self._samples), settings.enrollment_samples)
@@ -265,12 +275,12 @@ class EnrollmentSession:
         self._set_state(EnrollmentState.CAPTURING)
 
     def _save(self) -> None:
-        """Registra la persona con i suoi campioni: galleria locale subito, database tramite il server."""
+        """Invia al server la richiesta di registrazione, con i campioni e la foto del volto."""
         try:
-            self.person_id = self._store.create_person(self.name, self._samples, self._qualities)
+            self.person_id = self._store.create_person(self.name, self._samples, self._qualities, self._photo)
         except StoreError as exc:
             logger.error("Salvataggio del profilo non riuscito: %s", exc)
-            self._cancel("Invio del profilo al server fallito", snooze=True)
+            self._cancel("Invio della richiesta al server fallito", snooze=True)
             return
         self._set_state(EnrollmentState.COMPLETED)
 
@@ -288,6 +298,8 @@ class EnrollmentSession:
     def _clear_buffers(self) -> None:
         self._samples.clear()
         self._qualities.clear()
+        self._photo = None
+        self._photo_sharpness = float("-inf")
         self._reference = None
         self._known_streak = 0
         self._live = False

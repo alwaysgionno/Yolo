@@ -64,6 +64,10 @@ class RecognitionService:
             live = self._liveness is None or self._liveness.observe(detection, match.person_id if match else None)
             if match is None:
                 continue  # volto sconosciuto: sara la UI a proporre la registrazione
+            if match.pending:
+                # Registrazione non ancora approvata dal server: la persona non ha accesso, quindi
+                # niente saluto, niente accesso registrato e niente apprendimento continuo
+                continue
             if not live:
                 # Potrebbe essere una foto: niente saluto, niente accesso registrato e niente apprendimento.
                 # Per la politica dei saluti la persona non e stata vista: il saluto arrivera a verifica riuscita.
@@ -76,13 +80,21 @@ class RecognitionService:
         return greetings
 
     def _identify(self, detection: FaceDetection) -> Match | None:
-        """Restituisce la persona registrata piu simile al volto, se supera la soglia di riconoscimento."""
+        """Restituisce la persona registrata piu simile al volto, se supera la soglia di riconoscimento.
+
+        Se nessuna persona approvata la supera, cerca tra le registrazioni in attesa di approvazione:
+        il volto risulta allora "in attesa" (`Match.pending`) e non viene riproposto per la registrazione.
+        """
         if detection.embedding is None:
             return None
+        threshold = self._settings.recognition_threshold
         candidates = self._store.find_nearest(detection.embedding, self._settings.top_k_neighbors)
-        if not candidates or candidates[0].similarity < self._settings.recognition_threshold:
-            return None
-        return candidates[0]
+        if candidates and candidates[0].similarity >= threshold:
+            return candidates[0]
+        pending = self._store.find_pending(detection.embedding)
+        if pending is not None and pending.similarity >= threshold:
+            return pending
+        return None
 
     def _record_access(self, match: Match, kind: GreetingKind) -> None:
         """Invia l'accesso al server. Un evento non accodato non blocca il saluto a schermo."""

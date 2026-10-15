@@ -86,8 +86,28 @@ class GreetingTest(RecognitionServiceTestCase):
         self.assertEqual(self.see(0.47), [WELCOME_BACK_MARIO])
         self.assertEqual(self.db.greetings, [("uid-mario", 0.47)])
 
-    def test_person_just_enrolled_is_not_greeted_again(self) -> None:
-        # create_person valorizza last_access_at: al primo riconoscimento l'ultimo accesso e di pochi istanti fa
+    def test_person_waiting_for_approval_is_marked_but_not_greeted(self) -> None:
+        self.db.pending = Match("uid-carla", "Carla", 0.9, pending=True)
+        detection = make_detection()
+        self.assertEqual(self.service.process([detection]), [])
+        self.assertTrue(detection.match.pending)
+        self.assertEqual((self.db.greetings, self.db.continuous), ([], []))
+
+    def test_approved_person_wins_over_a_pending_one(self) -> None:
+        self.db.nearest = [Match("uid-mario", "Mario", 0.70)]
+        self.db.pending = Match("uid-carla", "Carla", 0.9, pending=True)
+        detection = make_detection()
+        self.assertEqual(self.service.process([detection]), [WELCOME_MARIO])
+        self.assertEqual(detection.match.person_id, "uid-mario")
+
+    def test_pending_face_below_threshold_stays_unknown(self) -> None:
+        self.db.pending = Match("uid-carla", "Carla", 0.2, pending=True)
+        detection = make_detection()
+        self.service.process([detection])
+        self.assertIsNone(detection.match)
+
+    def test_person_just_approved_is_not_greeted_again(self) -> None:
+        # Il server registra la richiesta come primo accesso: poco dopo non c'e un secondo saluto
         self.assertEqual(self.see(0.60, last_access_age_s=0.5), [])
         self.assertEqual(self.db.greetings, [])
 

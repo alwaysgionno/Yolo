@@ -29,6 +29,8 @@ MIN_CROP_SIDE_PX = 160                # i ritagli piccoli vengono ingranditi pri
 CROP_PADDING_RATIO = 0.25             # margine extra attorno al bounding box di YOLO
 CROP_EDGE_MARGIN_PX = 2.0             # un volto cosi vicino al bordo del ritaglio e tagliato a meta
 DUPLICATE_FACE_IOU = 0.4              # oltre questa sovrapposizione due volti sono lo stesso
+PHOTO_SIZE_PX = 320                   # lato della foto inviata con la richiesta di registrazione
+PHOTO_MARGIN_RATIO = 1.4              # la foto include un po' di capelli e mento attorno al volto
 
 
 class _Crop(NamedTuple):
@@ -133,6 +135,7 @@ class FaceProcessor:
                     face_width=float(x2 - x1),
                     sharpness=_sharpness(frame[y1:y2, x1:x2]),
                     patch=face.patch,
+                    photo=face_photo(frame, face.bbox),
                 )
             )
         return detections
@@ -248,6 +251,26 @@ def _iou(first: BBox, second: BBox) -> float:
     area_first = (first[2] - first[0]) * (first[3] - first[1])
     area_second = (second[2] - second[0]) * (second[3] - second[1])
     return intersection / float(area_first + area_second - intersection)
+
+
+def face_photo(frame: np.ndarray, bbox: BBox, size: int = PHOTO_SIZE_PX) -> np.ndarray | None:
+    """Ritaglio quadrato a colori del volto, con un po' di margine, ridotto a `size` pixel di lato.
+
+    E la foto che accompagna la richiesta di registrazione: serve all'amministratore per
+    riconoscere la persona prima di approvarla. None se il volto e troppo piccolo.
+    """
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
+    side = int(max(x2 - x1, y2 - y1) * PHOTO_MARGIN_RATIO)
+    left, top = max(0, (x1 + x2 - side) // 2), max(0, (y1 + y2 - side) // 2)
+    crop = frame[top:min(height, top + side), left:min(width, left + side)]
+    side = min(crop.shape[:2])
+    if side < MIN_REGION_SIDE_PX:
+        return None
+    offset_y, offset_x = (crop.shape[0] - side) // 2, (crop.shape[1] - side) // 2
+    square = crop[offset_y:offset_y + side, offset_x:offset_x + side]
+    interpolation = cv2.INTER_AREA if side > size else cv2.INTER_CUBIC
+    return cv2.resize(square, (size, size), interpolation=interpolation)
 
 
 def _sharpness(image: np.ndarray) -> float:

@@ -51,16 +51,21 @@ class PersonStore:
         self._require_gallery()
         return self._gallery.find_nearest(embedding, limit)
 
+    def find_pending(self, embedding: np.ndarray) -> Match | None:
+        """Registrazione in attesa di approvazione piu simile al volto, se ce n'e una."""
+        return self._gallery.find_pending(embedding)
+
     def create_person(
         self,
         full_name: str,
         embeddings: Sequence[np.ndarray],
         qualities: Sequence[float],
+        photo: np.ndarray | None = None,
     ) -> str:
-        """Registra una nuova persona: la pubblica al server e la aggiunge subito alla galleria locale.
+        """Invia al server la richiesta di registrazione di una nuova persona, con la foto del volto.
 
-        La registrazione vale come primo accesso: la persona appena accolta con "Benvenuto" non
-        riceve un secondo saluto al primo riconoscimento. Restituisce l'uid assegnato.
+        La persona non entra nella galleria: resta "in attesa" (non riconosciuta) finche un
+        amministratore non approva la richiesta dalla pagina web del server. Restituisce l'uid assegnato.
         """
         if not embeddings:
             raise ValueError("Serve almeno un embedding per registrare una persona")
@@ -68,19 +73,25 @@ class PersonStore:
             raise ValueError("Ogni embedding deve avere il proprio punteggio di qualita")
         self._require_gallery()
         person_uid = str(uuid.uuid4())
-        self._publish(
-            contract.TOPIC_EVENT_ENROLLED,
-            {
-                "person_uid": person_uid,
-                "full_name": full_name,
-                "samples": [
-                    {"embedding": contract.encode_embedding(embedding), "quality": float(quality)}
-                    for embedding, quality in zip(embeddings, qualities)
-                ],
-            },
+        payload: dict = {
+            "person_uid": person_uid,
+            "full_name": full_name,
+            "samples": [
+                {"embedding": contract.encode_embedding(embedding), "quality": float(quality)}
+                for embedding, quality in zip(embeddings, qualities)
+            ],
+        }
+        encoded_photo = contract.encode_photo(photo) if photo is not None else None
+        if encoded_photo is not None:
+            payload["photo"] = encoded_photo
+        else:
+            logger.warning("Richiesta di registrazione di %s inviata senza foto", full_name)
+        self._publish(contract.TOPIC_EVENT_ENROLLED, payload)
+        self._gallery.add_pending(person_uid, full_name, embeddings)
+        logger.info(
+            "Richiesta di registrazione inviata: %s (uid=%s, campioni=%d), in attesa di approvazione",
+            full_name, person_uid, len(embeddings),
         )
-        self._gallery.add_local(person_uid, full_name, embeddings)
-        logger.info("Nuova persona registrata: %s (uid=%s, campioni=%d)", full_name, person_uid, len(embeddings))
         return person_uid
 
     def record_greeting(self, person_id: str, similarity: float) -> None:
