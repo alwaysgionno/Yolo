@@ -5,7 +5,7 @@ spostano in modo diverso tra loro (parallasse), perche stanno a profondita diver
 stampata o mostrata su un telefono e un piano: comunque la si inclini o la si sposti, tutti
 i suoi punti seguono una sola trasformazione prospettica (omografia).
 
-Per ogni volto si confrontano due immagini riprese in momenti diversi:
+Per ogni volto si confronta l'immagine attuale con alcune immagini riprese nei secondi precedenti:
     1. il volto viene ritagliato e allineato (`align_face`) usando i 5 punti di InsightFace;
     2. si cerca l'omografia che sovrappone al meglio la seconda immagine alla prima;
     3. si misura con il flusso ottico quanto movimento resta dopo la sovrapposizione
@@ -24,6 +24,7 @@ Le immagini di riferimento restano in memoria per pochi secondi e non vengono ma
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -54,8 +55,16 @@ MIN_VALID_AREA = 0.7          # parte del volto che deve restare coperta dopo la
 PARALLAX_PERCENTILE = 90      # il parallasse riguarda una parte del volto: si guarda la coda alta
 
 CONFIRMATIONS = 2             # confronti sopra soglia richiesti prima di considerare vero il volto
-REFERENCE_MAX_AGE_S = 4.0     # senza conferme, il riferimento viene rinnovato (luce e posa cambiano)
+EVIDENCE_WINDOW_S = 4.0       # le conferme devono cadere in questo intervallo: una prova isolata scade
+# Riferimenti: le immagini degli ultimi secondi, una ogni REFERENCE_INTERVAL_S. Con un solo riferimento
+# bastava che fosse stato preso a meta di una rotazione perche il ritorno della testa non mostrasse nulla
+REFERENCE_INTERVAL_S = 0.5
+REFERENCE_MAX_AGE_S = 3.0
+RECENT_REFERENCE_AGE_S = 1.0  # oltre al piu vecchio si usa anche il riferimento di circa un secondo fa
 MIN_CHECK_INTERVAL_S = 0.25   # un confronto costa qualche decina di millisecondi: non uno per fotogramma
+# La testa che gira produce immagini un po' mosse: per l'anti-spoofing basta meta della nitidezza
+# richiesta ai campioni di registrazione, altrimenti verrebbero scartati proprio i fotogrammi utili
+SHARPNESS_RATIO = 0.5
 HOLD_SECONDS = 30.0           # un volto verificato resta tale finche non sparisce per questo tempo
 SAME_FACE_SIMILARITY = 0.50   # similarita minima tra due embedding dello stesso volto sconosciuto
 MAX_UNKNOWN_FACES = 8
@@ -184,7 +193,11 @@ def parallax(reference: np.ndarray, current: np.ndarray) -> float | None:
 
 
 class LivenessCheck:
-    """Accumula le prove che un volto e tridimensionale. Una istanza per volto seguito."""
+    """Accumula le prove che un volto e tridimensionale. Una istanza per volto seguito.
+
+    Ogni confronto mette l'immagine attuale di fronte al riferimento piu vecchio e a quello di circa
+    un secondo fa: cosi una rotazione viene vista sia quando e lenta sia quando la testa torna dritta.
+    """
 
     def __init__(
         self,
@@ -195,10 +208,9 @@ class LivenessCheck:
         self._min_parallax = min_parallax
         self._clock = clock
         self._measure = measure
-        self._reference: np.ndarray | None = None
-        self._reference_at = 0.0
+        self._references: deque[tuple[float, np.ndarray]] = deque()
+        self._evidence: deque[float] = deque()  # istanti dei confronti sopra soglia
         self._last_check_at = float("-inf")
-        self._confirmations = 0
         self.verified = False
         self.started_at = clock()
 
@@ -207,28 +219,32 @@ class LivenessCheck:
         if self.verified:
             return True
         now = self._clock()
-        if self._reference is None:
-            self._set_reference(patch, now)
-            return False
-        if now - self._last_check_at < MIN_CHECK_INTERVAL_S:
-            return False
-        self._last_check_at = now
+        while self._references and now - self._references[0][0] > REFERENCE_MAX_AGE_S:
+            self._references.popleft()
+        while self._evidence and now - self._evidence[0] > EVIDENCE_WINDOW_S:
+            self._evidence.popleft()
 
-        score = self._measure(self._reference, patch)
-        if score is not None and score >= self._min_parallax:
-            self._confirmations += 1
-            if self._confirmations >= CONFIRMATIONS:
+        if self._references and now - self._last_check_at >= MIN_CHECK_INTERVAL_S:
+            self._last_check_at = now
+            for reference in self._choose_references(now):
+                score = self._measure(reference, patch)
+                if score is not None and score >= self._min_parallax:
+                    self._evidence.append(now)
+                    break  # una prova per confronto: la seconda deve arrivare da un altro momento
+            if len(self._evidence) >= CONFIRMATIONS:
                 self.verified = True
-                self._reference = None  # non serve piu: l'immagine non resta in memoria
-        elif now - self._reference_at > REFERENCE_MAX_AGE_S:
-            # Nessuna prova con questo riferimento: si riparte dall'immagine attuale
-            self._set_reference(patch, now)
-        return self.verified
+                self._references.clear()  # non servono piu: le immagini non restano in memoria
+                return True
 
-    def _set_reference(self, patch: np.ndarray, now: float) -> None:
-        self._reference = patch
-        self._reference_at = now
-        self._confirmations = 0
+        if not self._references or now - self._references[-1][0] >= REFERENCE_INTERVAL_S:
+            self._references.append((now, patch))
+        return False
+
+    def _choose_references(self, now: float) -> list[np.ndarray]:
+        """Il riferimento piu vecchio e quello piu vicino a RECENT_REFERENCE_AGE_S fa, se diverso."""
+        oldest = self._references[0]
+        recent = min(self._references, key=lambda item: abs(now - item[0] - RECENT_REFERENCE_AGE_S))
+        return [oldest[1]] if recent is oldest else [oldest[1], recent[1]]
 
 
 @dataclass
@@ -282,7 +298,7 @@ class LivenessTracker:
         usable = (
             detection.patch is not None
             and detection.face_width >= self._min_face_width
-            and detection.sharpness >= self._min_sharpness
+            and detection.sharpness >= self._min_sharpness * SHARPNESS_RATIO
         )
         if usable and not tracked.check.verified:
             tracked.check.observe(detection.patch)

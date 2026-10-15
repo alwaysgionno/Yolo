@@ -100,6 +100,7 @@ class Settings:
     wave_greeting: bool
     wave_cooldown_seconds: float
     pose_model_path: Path
+    pose_image_size: int
 
     # Comportamento applicativo
     welcome_back_absence_seconds: float
@@ -154,6 +155,7 @@ class Settings:
             wave_greeting=_get_bool("WAVE_GREETING", False),
             wave_cooldown_seconds=_get_float("WAVE_COOLDOWN_SECONDS", 30.0),
             pose_model_path=pose_path,
+            pose_image_size=_get_int("POSE_IMAGE_SIZE", 480),
             welcome_back_absence_seconds=_get_float("WELCOME_BACK_ABSENCE_SECONDS", 600.0),
             unknown_snooze_seconds=_get_float("UNKNOWN_SNOOZE_SECONDS", 60.0),
             unknown_confirm_seconds=_get_float("UNKNOWN_CONFIRM_SECONDS", 1.5),
@@ -200,6 +202,7 @@ class Settings:
             ("MIN_FACE_WIDTH_PX", self.min_face_width_px),
             ("CONTINUOUS_BATCH_SIZE", self.continuous_batch_size),
             ("TOP_K_NEIGHBORS", self.top_k_neighbors),
+            ("POSE_IMAGE_SIZE", self.pose_image_size),
         ):
             if value < 1:
                 raise ConfigurationError(f"{label} deve essere un intero maggiore di zero")
@@ -219,6 +222,7 @@ class Settings:
         for label, value in (
             ("YOLO_IMAGE_SIZE", self.yolo_image_size),
             ("INSIGHTFACE_DET_SIZE", self.insightface_det_size),
+            ("POSE_IMAGE_SIZE", self.pose_image_size),
         ):
             if value % MODEL_STRIDE != 0:
                 raise ConfigurationError(f"{label} deve essere un multiplo di {MODEL_STRIDE}")
