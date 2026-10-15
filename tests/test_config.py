@@ -30,6 +30,7 @@ class ValidationTest(unittest.TestCase):
             "attesa negativa": {"unknown_confirm_seconds": -1.0},
             "assenza negativa": {"welcome_back_absence_seconds": -1.0},
             "attesa del saluto con la mano negativa": {"wave_cooldown_seconds": -1.0},
+            "posa non multipla di 32": {"pose_image_size": 300},
         }
         for label, overrides in cases.items():
             with self.subTest(label):

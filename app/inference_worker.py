@@ -16,14 +16,16 @@ import numpy as np
 from .camera_stream import CameraStream
 from .person_store import StoreError
 from .face_processor import FaceProcessor
-from .models import FrameResult, Greeting
+from .models import BodyPose, FrameResult, Greeting
 from .pose_estimator import PoseEstimator
 from .recognition_service import RecognitionService
-from .wave_detector import attach_arms
 
 logger = logging.getLogger(__name__)
 
 PACKET_TIMEOUT_S = 0.2
+# Il modello di posa gira solo con un volto inquadrato, e ancora per questo tempo dopo l'ultimo:
+# la mano che saluta puo coprire la faccia per qualche fotogramma
+POSE_GRACE_S = 1.5
 RETRY_DELAY_S = 0.5
 FPS_SMOOTHING = 0.2
 
@@ -49,6 +51,7 @@ class InferenceWorker(threading.Thread):
         self._greetings: queue.Queue[Greeting] = queue.Queue()
         self._fps = 0.0
         self._gallery_ok = True  # esito dell'ultimo riconoscimento, usato solo dal thread di inferenza
+        self._last_face_at = float("-inf")  # ultimo fotogramma con almeno un volto
 
     @property
     def fps(self) -> float:
@@ -112,12 +115,15 @@ class InferenceWorker(threading.Thread):
         """Esegue la pipeline completa su un singolo fotogramma."""
         started = time.perf_counter()
         detections = self._processor.process(frame)
-        if self._poses is not None and detections:  # senza volti nessuno puo salutare: si risparmia il modello
-            attach_arms(detections, self._poses.estimate(frame))
+        if detections:
+            self._last_face_at = started
+        poses: list[BodyPose] = []
+        if self._poses is not None and started - self._last_face_at <= POSE_GRACE_S:
+            poses = self._poses.estimate(frame)  # senza volti nessuno puo salutare: si risparmia il modello
 
         gallery_ok = True
         try:
-            greetings = self._recognizer.process(detections)
+            greetings = self._recognizer.process(detections, poses)
         except StoreError as exc:
             if self._gallery_ok:  # si registra solo il cambio di stato, non un errore per fotogramma
                 logger.warning("Riconoscimento sospeso: %s", exc)

@@ -10,9 +10,9 @@ import numpy as np
 from app.enrollment import ENTER_KEYS, EnrollmentSession, EnrollmentState
 from app.liveness import (
     CONFIRMATIONS,
+    EVIDENCE_WINDOW_S,
     HOLD_SECONDS,
     PATCH_SIZE,
-    REFERENCE_MAX_AGE_S,
     LivenessCheck,
     LivenessTracker,
     align_face,
@@ -135,13 +135,36 @@ class LivenessCheckTest(unittest.TestCase):
         self.assertTrue(self.show(12.0))   # seconda prova
         self.assertTrue(self.show(0.0))    # una volta verificato lo resta
 
-    def test_isolated_evidence_expires_with_the_reference(self) -> None:
+    def test_isolated_evidence_expires(self) -> None:
         self.show(0.0)
         self.assertFalse(self.show(10.0))  # un solo fotogramma anomalo
-        self.clock.advance(REFERENCE_MAX_AGE_S)
-        self.assertFalse(self.show(0.0))   # nessuna conferma: nuovo riferimento, si riparte da zero
-        self.assertFalse(self.show(10.0))
-        self.assertTrue(self.show(10.0))
+        self.clock.advance(EVIDENCE_WINDOW_S)
+        self.assertFalse(self.show(10.0))  # riferimenti e prova scaduti: si riparte da zero
+        self.assertFalse(self.show(0.0))   # prima prova
+        self.assertFalse(self.show(10.0))  # uguale al riferimento: nessuna prova
+        self.assertTrue(self.show(0.0))    # seconda prova
+
+    def test_large_turn_is_seen_through_a_recent_reference(self) -> None:
+        # Il confronto con il riferimento di circa un secondo fa vede la rotazione anche quando
+        # quello piu vecchio e troppo diverso per essere misurato
+        def limited(reference: np.ndarray, current: np.ndarray) -> float | None:
+            distance = pose_distance(reference, current)
+            return None if distance > 0.15 else distance
+
+        check = LivenessCheck(MIN_PARALLAX, self.clock, limited)
+        verified = []
+        # La testa gira di 20 e poi di altri 10: rispetto alla posa iniziale il salto non e misurabile
+        for pose in (0.0, 0.0, 0.0, 20.0, 20.0, 20.0, 20.0, 30.0, 30.0):
+            verified.append(check.observe(pose_patch(pose)))
+            self.clock.advance(STEP_S)
+        self.assertFalse(any(verified[:-1]))
+        self.assertTrue(verified[-1])
+
+    def test_references_are_discarded_once_verified(self) -> None:
+        for pose in (0.0, 10.0, 12.0):
+            self.show(pose)
+        self.assertTrue(self.check.verified)
+        self.assertEqual(len(self.check._references), 0)
 
     def test_checks_are_rate_limited(self) -> None:
         calls: list[None] = []
@@ -186,6 +209,10 @@ class LivenessTrackerTest(unittest.TestCase):
     def test_each_person_is_verified_separately(self) -> None:
         self.assertTrue(self.turn_head("uid-mario"))
         self.assertFalse(self.show(0.0, "uid-anna"))
+
+    def test_slightly_blurred_frames_are_used(self) -> None:
+        # Girando la testa l'immagine si muove un po': meta della nitidezza minima basta
+        self.assertTrue(self.turn_head(sharpness=35.0))
 
     def test_poor_frames_are_not_used(self) -> None:
         self.assertFalse(self.turn_head(sharpness=10.0))

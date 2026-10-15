@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 import numpy as np
 
@@ -17,7 +17,7 @@ from .config import Settings
 from .person_store import PersonStore, StoreError
 from .greeting_policy import GreetingPolicy
 from .liveness import LivenessTracker
-from .models import FaceDetection, Greeting, GreetingKind, Match
+from .models import BBox, BodyPose, FaceDetection, Greeting, GreetingKind, Match
 from .wave_detector import WaveDetector
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,12 @@ class RecognitionService:
         self._learning_buffers: dict[str, list[tuple[np.ndarray, float]]] = defaultdict(list)
         self._last_learning_update: dict[str, float] = {}
 
-    def process(self, detections: list[FaceDetection]) -> list[Greeting]:
+    def process(self, detections: list[FaceDetection], poses: Sequence[BodyPose] = ()) -> list[Greeting]:
         """Identifica ogni volto e restituisce i saluti dovuti in questo fotogramma.
+
+        Args:
+            detections: volti rilevati nel fotogramma.
+            poses: pose delle persone inquadrate, per il saluto con la mano (vuoto se disattivato).
 
         Raises:
             StoreError: se la galleria non e ancora arrivata dal server.
@@ -62,6 +66,7 @@ class RecognitionService:
             detection.match = self._identify(detection)
 
         greetings: list[Greeting] = []
+        greetable: list[tuple[BBox, Match]] = []  # chi puo ricevere il saluto con la mano
         for detection in detections:
             match = detection.match
             live = self._liveness is None or self._liveness.observe(detection, match.person_id if match else None)
@@ -75,15 +80,18 @@ class RecognitionService:
                 # Potrebbe essere una foto: niente saluto, niente accesso registrato e niente apprendimento.
                 # Per la politica dei saluti la persona non e stata vista: il saluto arrivera a verifica riuscita.
                 continue
+            greetable.append((detection.bbox, match))
             kind = self._greeting_policy.observe(match.person_id, match.last_access_age_s)
             if kind is not None:
                 self._record_access(match, kind)
                 greetings.append(Greeting(kind, match.full_name))
-            if self._waves is not None and self._waves.observe(match.person_id, detection.arms, detection.face_width):
+            self._learn_if_confident(detection, match)
+
+        if self._waves is not None:
+            for match in self._waves.update(poses, greetable):
                 # Solo a schermo: il saluto con la mano non e un accesso e non viene inviato al server
                 logger.info("Saluto con la mano: %s", match.full_name)
                 greetings.append(Greeting(GreetingKind.WAVE, match.full_name))
-            self._learn_if_confident(detection, match)
         return greetings
 
     def _identify(self, detection: FaceDetection) -> Match | None:
