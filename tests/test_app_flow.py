@@ -162,6 +162,11 @@ class GreetingTextTest(unittest.TestCase):
         newcomers = [Greeting(GreetingKind.WELCOME, "Carla"), Greeting(GreetingKind.WELCOME, "Dario")]
         self.assertEqual(_greeting_texts(newcomers), ["Benvenuti, Carla e Dario!"])
 
+    def test_wave_is_answered_with_ciao(self) -> None:
+        self.assertEqual(_greeting_texts([Greeting(GreetingKind.WAVE, "Mario")]), ["Ciao, Mario!"])
+        waves = [Greeting(GreetingKind.WAVE, "Mario"), Greeting(GreetingKind.WAVE, "Anna")]
+        self.assertEqual(_greeting_texts(waves), ["Ciao, Mario e Anna!"])
+
 
 if __name__ == "__main__":
     unittest.main()

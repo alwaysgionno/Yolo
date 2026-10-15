@@ -11,6 +11,9 @@ import numpy as np
 BBox = tuple[int, int, int, int]
 """Bounding box in pixel nel formato (x1, y1, x2, y2)."""
 
+Point = tuple[float, float]
+"""Punto in pixel nel formato (x, y)."""
+
 
 @dataclass(frozen=True)
 class Match:
@@ -39,6 +42,7 @@ class GreetingKind(Enum):
 
     WELCOME = auto()       # "Benvenuto": primo riconoscimento in assoluto
     WELCOME_BACK = auto()  # "Bentornato": rientro dopo un'assenza dal campo visivo
+    WAVE = auto()          # "Ciao": la persona ha salutato con la mano (solo a schermo, non inviato al server)
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,23 @@ class Greeting:
 
     kind: GreetingKind
     full_name: str
+
+
+@dataclass(frozen=True)
+class ArmPose:
+    """Un braccio stimato dal modello di posa: bastano spalla e polso per riconoscere il saluto."""
+
+    side: int  # 0 sinistro, 1 destro (dal punto di vista della persona)
+    shoulder: Point
+    wrist: Point
+
+
+@dataclass(frozen=True)
+class BodyPose:
+    """Punti del corpo di una persona utili al saluto con la mano. Il naso serve ad associarla al volto."""
+
+    nose: Point
+    arms: tuple[ArmPose, ...]  # solo i bracci con spalla e polso affidabili
 
 
 @dataclass
@@ -63,6 +84,7 @@ class FaceDetection:
     live: bool | None = None             # esito della verifica anti-spoofing; None se non e stata eseguita
     liveness_wait_s: float = 0.0         # da quanti secondi il volto attende di essere verificato
     photo: np.ndarray | None = None      # ritaglio a colori del volto (BGR), inviato con la richiesta di registrazione
+    arms: tuple[ArmPose, ...] = ()       # bracci della persona a cui appartiene il volto (saluto con la mano)
 
 
 @dataclass

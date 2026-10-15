@@ -96,6 +96,11 @@ class Settings:
     liveness_check: bool
     liveness_min_parallax: float
 
+    # Saluto con la mano: "Ciao, Nome!" quando una persona riconosciuta saluta (app/wave_detector.py)
+    wave_greeting: bool
+    wave_cooldown_seconds: float
+    pose_model_path: Path
+
     # Comportamento applicativo
     welcome_back_absence_seconds: float
     unknown_snooze_seconds: float
@@ -125,6 +130,9 @@ class Settings:
         yolo_path = Path(_get_str("YOLO_MODEL_PATH", "models/yolov8n-face.pt"))
         if not yolo_path.is_absolute():
             yolo_path = PROJECT_ROOT / yolo_path
+        pose_path = Path(_get_str("POSE_MODEL_PATH", "models/yolov8n-pose.pt"))
+        if not pose_path.is_absolute():
+            pose_path = PROJECT_ROOT / pose_path
 
         settings = cls(
             mqtt_host=_get_str("MQTT_HOST", "127.0.0.1"),
@@ -143,6 +151,9 @@ class Settings:
             continuous_learning_threshold=_get_float("CONTINUOUS_LEARNING_THRESHOLD", 0.55),
             liveness_check=_get_bool("LIVENESS_CHECK", True),
             liveness_min_parallax=_get_float("LIVENESS_MIN_PARALLAX", 0.07),
+            wave_greeting=_get_bool("WAVE_GREETING", False),
+            wave_cooldown_seconds=_get_float("WAVE_COOLDOWN_SECONDS", 30.0),
+            pose_model_path=pose_path,
             welcome_back_absence_seconds=_get_float("WELCOME_BACK_ABSENCE_SECONDS", 600.0),
             unknown_snooze_seconds=_get_float("UNKNOWN_SNOOZE_SECONDS", 60.0),
             unknown_confirm_seconds=_get_float("UNKNOWN_CONFIRM_SECONDS", 1.5),
@@ -200,6 +211,7 @@ class Settings:
             ("UNKNOWN_CONFIRM_SECONDS", self.unknown_confirm_seconds),
             ("MIN_SHARPNESS", self.min_sharpness),
             ("CONTINUOUS_MIN_INTERVAL_SECONDS", self.continuous_min_interval_seconds),
+            ("WAVE_COOLDOWN_SECONDS", self.wave_cooldown_seconds),
         ):
             if value < 0:
                 raise ConfigurationError(f"{label} non puo essere negativo")

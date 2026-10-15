@@ -33,6 +33,9 @@ def make_settings(**overrides: object) -> Settings:
         "continuous_learning_threshold": 0.55,
         "liveness_check": False,  # i test che la riguardano la attivano in modo esplicito
         "liveness_min_parallax": 0.07,
+        "wave_greeting": False,  # i test che lo riguardano lo attivano in modo esplicito
+        "wave_cooldown_seconds": 30.0,
+        "pose_model_path": Path("models/yolov8n-pose.pt"),
         "welcome_back_absence_seconds": 600.0,
         "unknown_snooze_seconds": 60.0,
         "unknown_confirm_seconds": 1.5,

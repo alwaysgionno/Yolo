@@ -44,6 +44,7 @@ Le versioni sono in `requirements.txt`, con la spiegazione di ogni libreria.
               │  RecognitionService: find_nearest (galleria), soglia, apprendimento
               │  LivenessTracker:    anti-spoofing, un volto alla volta (parallasse tra due immagini)
               │  GreetingPolicy:     presenza per persona, "Benvenuto" / "Bentornato"
+              │  PoseEstimator + WaveDetector: saluto con la mano, "Ciao" (solo con WAVE_GREETING=1)
               ▼
             FrameResult (ultimo risultato, protetto da lock) + coda dei saluti
               │
@@ -131,6 +132,16 @@ Una testa vera che gira anche di poco mostra parallasse: naso, guance e fronte, 
 - **Effetti:** finché una persona riconosciuta non è verificata, `RecognitionService` non chiama `GreetingPolicy.observe`, non pubblica l'accesso e non alimenta l'apprendimento continuo: per i saluti è come se non fosse stata vista, e il saluto arriva a verifica riuscita. La UI mostra il riquadro color ambra con "verifica in corso" e, dopo 2 secondi, "gira leggermente la testa".
 - **Taratura (13 ottobre 2026, solo in simulazione):** foto piatte deformate con omografie fino a 45° e teste "vere" ottenute spostando i pixel secondo la profondità dei 68 punti 3D, con rumore, sfocatura e scala di una webcam, su 8 volti delle immagini di esempio (94-144 px). Foto: massimo 0.052 su 594 confronti. Testa girata di almeno 10°: minimo 0.064, mediana 0.14. Attraverso `FaceProcessor._extract_faces` e `LivenessTracker`: 0 sequenze di foto agitata verificate su 32; 31 su 32 con la testa che oscilla di 8-15° (in mediana dopo 7-10 risultati di inferenza); 0 su 16 con la testa ferma. **Non provato con una webcam e con persone reali.**
 
+## 8 ter. Saluto con la mano (`app/pose_estimator.py`, `app/wave_detector.py`)
+
+Attivo solo con `WAVE_GREETING=1` (predefinito 0), così si abilita telecamera per telecamera.
+
+- **`PoseEstimator`:** YOLOv8-pose (`POSE_MODEL_PATH`, predefinito `models/yolov8n-pose.pt`, scaricato da Ultralytics al primo avvio), con la stessa `YOLO_IMAGE_SIZE`. Per ogni persona restituisce un `BodyPose` con il naso e i bracci (`ArmPose`: lato, spalla, polso) i cui punti hanno confidenza `≥ 0.5`. L'`InferenceWorker` lo esegue solo se nel fotogramma c'è almeno un volto.
+- **`attach_arms`:** associa ogni posa al volto che contiene il suo naso (il più vicino al centro, se più d'uno) e scrive i bracci in `FaceDetection.arms`.
+- **`WaveDetector.observe(person_id, arms, face_width)`:** chiamato da `RecognitionService.process` solo per le persone riconosciute, approvate e verificate dall'anti-spoofing. Segue per ogni braccio la posizione orizzontale del polso rispetto alla spalla, in larghezze del volto, finché il polso resta sopra la spalla (abbassando la mano il gesto ricomincia; un vuoto di oltre 0.6 secondi pure). Il saluto è riconosciuto con almeno 3 movimenti alternati (`count_swings`) ampi almeno 0.25 larghezze del volto entro 2 secondi. Poi la persona non viene risalutata con la mano per `WAVE_COOLDOWN_SECONDS` (30).
+- **Effetti:** produce `Greeting(GreetingKind.WAVE, nome)`, mostrato come "Ciao, Nome!" (o "Ciao, Mario e Anna!"). Non passa da `GreetingPolicy`, non chiama `record_greeting` e non tocca il contratto MQTT: per ora il saluto con la mano resta solo locale.
+- **Taratura:** le soglie sono costanti in `app/wave_detector.py`, verificate solo con traiettorie simulate nei test. **Non provato con una webcam e con persone reali.**
+
 ## 9. Galleria locale e collegamento MQTT
 
 Il contratto completo è in `docs/mqtt-contract.md` della repository del server; `app/contract.py` ne contiene topic e codifiche. Tutti i messaggi sono JSON con QoS 1; un embedding è il base64 di 512 float32 little-endian.
@@ -156,6 +167,9 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 | CONTINUOUS_LEARNING_THRESHOLD | 0.55 | Soglia per l'apprendimento continuo (deve essere ≥ della soglia di riconoscimento) |
 | LIVENESS_CHECK | 1 | Anti-spoofing: 1 attivo, 0 disattivato |
 | LIVENESS_MIN_PARALLAX | 0.07 | Parallasse minimo (in frazioni della distanza tra gli occhi) che distingue una testa vera da una foto. Più alto = più severo |
+| WAVE_GREETING | 0 | Saluto con la mano ("Ciao, Nome!"): 1 attivo, 0 disattivato |
+| WAVE_COOLDOWN_SECONDS | 30 | Attesa prima di un nuovo saluto con la mano alla stessa persona |
+| POSE_MODEL_PATH | models/yolov8n-pose.pt | Pesi YOLOv8-pose, scaricati automaticamente se mancano |
 | WELCOME_BACK_ABSENCE_SECONDS | 600 | Assenza minima dal campo visivo prima di "Bentornato". Sostituisce `GREETING_COOLDOWN_SECONDS`, che non viene più letta |
 | UNKNOWN_SNOOZE_SECONDS | 60 | Attesa prima di riproporre una registrazione annullata |
 | UNKNOWN_CONFIRM_SECONDS | 1.5 | Tempo per cui un volto sconosciuto deve restare inquadrato prima della richiesta del nome |
@@ -167,7 +181,7 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 ## 11. Mappa dei file
 
 - `app/config.py`: `Settings` (dataclass immutabile), validazione, `ConfigurationError`
-- `app/models.py`: `BBox`, `Match`, `FaceDetection`, `FrameResult`, `GreetingKind`, `Greeting`
+- `app/models.py`: `BBox`, `Point`, `Match`, `ArmPose`, `BodyPose`, `FaceDetection`, `FrameResult`, `GreetingKind`, `Greeting`
 - `app/camera_stream.py`: `CameraStream`, thread di cattura con riconnessione
 - `app/face_processor.py`: `FaceProcessor`, pipeline YOLO + InsightFace, funzioni di ritaglio e nitidezza
 - `app/gallery.py`: `Gallery`, persone ed embedding in memoria, ricerca del volto più simile
@@ -177,6 +191,8 @@ La telecamera non conosce lo schema del database: per quello vedi la repository 
 - `app/recognition_service.py`: `RecognitionService`, soglia, saluti, apprendimento continuo
 - `app/greeting_policy.py`: `GreetingPolicy`, regole di "Benvenuto" e "Bentornato"
 - `app/liveness.py`: `align_face`, `parallax`, `LivenessCheck`, `LivenessTracker`, anti-spoofing
+- `app/pose_estimator.py`: `PoseEstimator`, YOLOv8-pose per il saluto con la mano
+- `app/wave_detector.py`: `WaveDetector`, `attach_arms`, `count_swings`, riconoscimento del saluto con la mano
 - `app/inference_worker.py`: `InferenceWorker`, thread di inferenza, risultati, coda dei saluti
 - `app/new_face_selector.py`: `NewFaceSelector`, `find_same_face`, scelta e conferma del volto sconosciuto
 - `app/enrollment.py`: `EnrollmentSession`, `EnrollmentState`, registrazione del volto selezionato

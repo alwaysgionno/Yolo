@@ -29,6 +29,7 @@ class ValidationTest(unittest.TestCase):
             "batch nullo": {"continuous_batch_size": 0},
             "attesa negativa": {"unknown_confirm_seconds": -1.0},
             "assenza negativa": {"welcome_back_absence_seconds": -1.0},
+            "attesa del saluto con la mano negativa": {"wave_cooldown_seconds": -1.0},
         }
         for label, overrides in cases.items():
             with self.subTest(label):
@@ -75,6 +76,14 @@ class EnvFileTest(unittest.TestCase):
         self.assertEqual(settings.enrollment_samples, 8)
         self.assertEqual(settings.unknown_confirm_seconds, 1.5)
         self.assertEqual(settings.welcome_back_absence_seconds, 600.0)
+        self.assertFalse(settings.wave_greeting)  # il saluto con la mano si attiva telecamera per telecamera
+        self.assertEqual(settings.wave_cooldown_seconds, 30.0)
+        self.assertTrue(settings.pose_model_path.is_absolute())
+
+    def test_wave_greeting_can_be_enabled(self) -> None:
+        settings = self.load("MQTT_PASSWORD=una-password-di-prova\nWAVE_GREETING=1\nWAVE_COOLDOWN_SECONDS=10\n")
+        self.assertTrue(settings.wave_greeting)
+        self.assertEqual(settings.wave_cooldown_seconds, 10.0)
 
     def test_old_greeting_cooldown_is_ignored(self) -> None:
         # Un .env precedente puo contenere ancora la vecchia variabile: non deve accorciare l'assenza richiesta
